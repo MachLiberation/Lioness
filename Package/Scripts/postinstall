@@ -1,0 +1,114 @@
+#!/bin/sh
+# Clears out what older versions left, finds out which Mountain Lion image to use, and hands over to LionessSetup.sh in a
+# launch job: a download can outlast what Installer allows a script, and the job picks up again after a restart.
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+ROOT="$3"
+HOME_DIR="$ROOT/Library/Lioness"
+TWEAKS="$ROOT/private/var/ammonia/core/tweaks"
+CHOICES=/Users/Shared/.lioness-setup
+SETUP="$HOME_DIR/LionessSetup.sh"
+mkdir -p "$HOME_DIR/log"
+chown nobody:nobody "$HOME_DIR/log"
+chmod 755 "$HOME_DIR/log"
+touch "$HOME_DIR/log/setup.log"; chown root:wheel "$HOME_DIR/log/setup.log"
+
+# Remove what 1.x installed. Files only: stopping those jobs under a running session can take the session down.
+# They end at the next restart.
+rm -rf "${HOME_DIR:?}/lion-root" "${HOME_DIR:?}/state"
+rm -f "${HOME_DIR:?}/lioness-setup.sh"
+rm -f "${HOME_DIR:?}/server.enabled" "${HOME_DIR:?}/server.autoshow" "${HOME_DIR:?}/lioness-run" "${HOME_DIR:?}/lioness-broker" \
+      "${HOME_DIR:?}/libLionessServer.dylib.whitelist" "${HOME_DIR:?}/libLionessDock.dylib.whitelist" "${HOME_DIR:?}/ammonia_global.whitelist"
+rm -f "${HOME_DIR:?}/tweak/libLionessServer.dylib" "${HOME_DIR:?}/tweak/libLionessDock.dylib" "${HOME_DIR:?}/tweak/libLionessBridge.dylib"
+for N in libLionessServer libLionessDock libLionessBridge; do
+    rm -f "${TWEAKS:?}/${N:?}.dylib" "${TWEAKS:?}/${N:?}.dylib.whitelist" "${TWEAKS:?}/${N:?}.dylib.blacklist"
+done
+rm -f "${TWEAKS:?}/.com.lioness.bridge.token"
+rm -f "${ROOT:?}/Library/LaunchDaemons/com.lioness.broker.plist" "${ROOT:?}/Library/LaunchDaemons/com.lioness.coreservicesd.plist" \
+      "${ROOT:?}/Library/LaunchAgents/com.lioness.bridge.plist" "${ROOT:?}/Library/LaunchAgents/com.lioness.coreservicesd.plist"
+# Remove only our lines, and the file if that empties it.
+GLOBAL="$ROOT/private/var/ammonia/core/ammonia_global.whitelist"
+if [ -f "$GLOBAL" ] && grep -qxF -e WindowServer -e /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer "$GLOBAL"; then
+    grep -vxF -e WindowServer -e /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer "$GLOBAL" > "$GLOBAL.new"
+    if [ -s "$GLOBAL.new" ]; then chown root:wheel "$GLOBAL.new"; chmod 644 "$GLOBAL.new"; mv -f "$GLOBAL.new" "$GLOBAL"; else rm -f "${GLOBAL:?}.new" "${GLOBAL:?}"; fi
+fi
+# The old package's receipt listed the root's files: forgotten, so that no later upgrade takes them away.
+pkgutil --forget com.lioness.aqua >/dev/null 2>&1
+
+if [ "$ROOT" != "/" ]; then
+    echo "Installed on another volume: run sudo /Library/Lioness/LionessSetup.sh download once booted from it."
+    exit 0
+fi
+
+# Which image.
+CONSOLE=$(stat -f%u /dev/console 2>/dev/null); [ "${CONSOLE:-0}" = 0 ] && CONSOLE=""
+SOURCE=""
+WORK="$HOME_DIR/setup-work"
+# Written by the installer page, as the user. Trusted only if owned by that user.
+if [ -f "$CHOICES/choice" ] && [ -n "$CONSOLE" ] && [ "$(stat -f%u "$CHOICES/choice")" = "$CONSOLE" ]; then
+    KIND=$(sed -n 1p "$CHOICES/choice")
+    PICKED=$(sed -n 2p "$CHOICES/choice")
+    case "$KIND" in
+    keep | download) SOURCE=$KIND ;;
+    dmg)
+        # The page clones the image here, where this job may read it: macOS keeps root's launch jobs out of Downloads.
+        if [ -f "$CHOICES/image.dmg" ] && [ "$(stat -f%u "$CHOICES/image.dmg")" = "$CONSOLE" ]; then
+            mkdir -p "$WORK"
+            mv -f "$CHOICES/image.dmg" "$WORK/image.dmg" && SOURCE="$WORK/image.dmg"
+        fi
+        [ -n "$SOURCE" ] || SOURCE=$PICKED
+        ;;
+    esac
+fi
+rm -rf /Users/Shared/.lioness-setup
+[ "$SOURCE" = keep ] && ! sh "$SETUP" --check && SOURCE=""
+[ -z "$SOURCE" ] && sh "$SETUP" --check && SOURCE=keep
+# No page: an install from the command line, or a macOS that did not load it. Ask here, or fetch Apple's if there is nobody to ask.
+if [ -z "$SOURCE" ]; then
+    SOURCE=download
+    if [ -n "$CONSOLE" ]; then
+        mkdir -p "$CHOICES"; chown "$CONSOLE" "$CHOICES"
+        ANSWER=$(launchctl asuser "$CONSOLE" /usr/bin/osascript <<OSA 2>/dev/null
+set r to display dialog "Lioness needs Apple's Mountain Lion image for its drawing. It can download it (4.4 GB, in the background) or use a copy you already have." buttons {"Use My Image…", "Download from Apple"} default button 2 with title "Lioness" giving up after 300
+if button returned of r is "Use My Image…" then
+    set f to POSIX path of (choose file with prompt "Choose the Mountain Lion image (InstallMacOSX.dmg)" of type {"dmg"})
+    try
+        do shell script "cp -c " & quoted form of f & " $CHOICES/image.dmg"
+    end try
+    return f
+end if
+return "download"
+OSA
+)
+        if [ -z "$ANSWER" ]; then
+            SOURCE=none
+        elif [ "$ANSWER" != download ]; then
+            SOURCE=$ANSWER
+            if [ -f "$CHOICES/image.dmg" ]; then
+                mkdir -p "$WORK"
+                mv -f "$CHOICES/image.dmg" "$WORK/image.dmg" && SOURCE="$WORK/image.dmg"
+            fi
+        fi
+        rm -rf /Users/Shared/.lioness-setup
+    fi
+fi
+if [ "$SOURCE" = none ]; then
+    echo "No image chosen. Lioness stays off until: sudo /Library/Lioness/LionessSetup.sh download (or a path to the image)."
+    exit 0
+fi
+
+# The setup job. Quick cases finish while Installer waits; a download reports by notification when it is done.
+printf '%s\n' "$SOURCE" > "$HOME_DIR/setup.source"
+rm -f "${HOME_DIR:?}/setup.state"
+cp -f "$HOME_DIR/com.lioness.setup.plist" /Library/LaunchDaemons/com.lioness.setup.plist
+chown root:wheel /Library/LaunchDaemons/com.lioness.setup.plist
+chmod 644 /Library/LaunchDaemons/com.lioness.setup.plist
+launchctl bootstrap system /Library/LaunchDaemons/com.lioness.setup.plist || { echo "could not start com.lioness.setup" >&2; exit 1; }
+[ "$SOURCE" = download ] && { echo "Downloading Mountain Lion in the background."; exit 0; }
+WAITED=0
+while [ "$WAITED" -lt 300 ]; do
+    case "$(cat "$HOME_DIR/setup.state" 2>/dev/null)" in done | failed) break ;; esac
+    sleep 3
+    WAITED=$((WAITED + 3))
+done
+exit 0

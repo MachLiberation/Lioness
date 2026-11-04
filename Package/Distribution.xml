@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Lioness</title>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+    <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <choices-outline><line choice="com.lioness.appkit"/></choices-outline>
+    <choice id="com.lioness.appkit" title="Lioness" visible="false"><pkg-ref id="com.lioness.appkit"/></choice>
+    <pkg-ref id="com.lioness.appkit" version="VERSION" onConclusion="none">Lioness-component.pkg</pkg-ref>
+</installer-gui-script>
