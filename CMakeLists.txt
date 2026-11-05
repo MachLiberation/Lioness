@@ -54,9 +54,9 @@ FetchContent_Declare(Dobby
     EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(Dobby)
 
-# LionLayout.m and ZKSwizzle come from MacOSXArt (ThirdParty/MacOSXArt/LICENSE), which is written for ARC.
-add_library(LionessAqua SHARED Dylib/LionessAqua.mm Dylib/LionLayout.m ThirdParty/MacOSXArt/ZKSwizzle.m)
-set_source_files_properties(Dylib/LionLayout.m ThirdParty/MacOSXArt/ZKSwizzle.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-w;-fmodules")
+# LionLayout.m and ZKSwizzle come from MacOSXArt, which is written for ARC.
+add_library(LionessAqua SHARED Dylib/LionessAqua.mm Dylib/LionLayout.m Dylib/ZKSwizzle.m)
+set_source_files_properties(Dylib/LionLayout.m Dylib/ZKSwizzle.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-w;-fmodules")
 target_link_libraries(LionessAqua PRIVATE LionessClient dobby_static
     "-framework AppKit" "-framework QuartzCore" "-framework CoreText" "-lc++")
 target_compile_options(LionessAqua PRIVATE -fvisibility=hidden -Wno-deprecated-declarations)

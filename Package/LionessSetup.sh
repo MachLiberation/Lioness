@@ -7,6 +7,9 @@
 #   sudo /Library/Lioness/LionessSetup.sh /path/to.dmg    use this image
 #   sudo /Library/Lioness/LionessSetup.sh keep            use the root that is already there
 #   LionessSetup.sh --extract image.dmg outdir            only copy the files out (for development)
+#   sudo /Library/Lioness/LionessSetup.sh flavours download       fetch Flavours 2 from the Internet Archive and import its themes
+#   sudo /Library/Lioness/LionessSetup.sh flavours /path          import from a Flavours zip or DMG, a folder of themes, or one theme
+#   sudo /Library/Lioness/LionessSetup.sh flavour [name|none]     choose a theme; with no name, asks
 #
 # Accepts InstallMacOSX.dmg as Apple serves it, InstallESD.dmg, or an image holding the Install app.
 # The work folder needs about 7 GB with an image, 11 GB when downloading, and is deleted afterwards.
@@ -142,6 +145,140 @@ prepare_root() {   # What appkitd expects beyond Apple's files.
     printf 'nobody:*:-2:-2:Nobody:/var/empty:/usr/bin/false\nroot:*:0:0:System Administrator:/var/root:/bin/sh\n' > "$r/etc/passwd"
     printf 'nobody:*:-2:\nwheel:*:0:root\n' > "$r/etc/group"
     chmod 644 "$r/etc/master.passwd" "$r/etc/passwd" "$r/etc/group"
+    apply_flavour "$r"   # a theme chosen earlier survives a new root
+}
+
+# --- Flavours themes. Only theme data is ever taken from what is given, and the renderer reads it as data. No Flavours program runs,
+# and anything else alongside, a licence included, is left alone.
+FLAVOURS=$HOME_DIR/flavours
+FLAVOUR_FILE=usr/share/lioness/flavour.theme
+FLAVOURS_URL=https://web.archive.org/web/20210227211822/http://flavours.interacto.net/static/Flavours2-226.dmg
+FLAVOURS_SIZE=331220726
+FLAVOURS_SHA256=fe1c814aae316d959f29b267db386c71e18373bd1fd09760465f1e2872b7a743
+IMPORTED=0
+DAMAGED=0
+
+safe_theme_name() { printf '%s' "$1" | tr -d '/:\000-\037' | sed 's/^[. ]*//' | cut -c1-80; }
+
+unique_theme_path() {   # title, file: two different themes can share a title. The same one imported again replaces itself.
+    n=1
+    candidate="$FLAVOURS/$1.theme"
+    while [ -e "$candidate" ] && ! cmp -s "$candidate" "$2"; do
+        n=$((n + 1))
+        candidate="$FLAVOURS/$1 $n.theme"
+    done
+    printf '%s' "$candidate"
+}
+
+import_flavour_file() {   # A plist theme. The check also turns away files cut off part way, which no longer parse.
+    if ! plutil -extract Layers.Controls xml1 -o /dev/null "$1" 2>/dev/null; then DAMAGED=$((DAMAGED + 1)); return 1; fi
+    title=$(safe_theme_name "$(plutil -extract Info.Title raw -o - "$1" 2>/dev/null)")
+    [ -n "$title" ] || title=$(safe_theme_name "$(basename "$1" | sed -e 's/\.xml$//' -e 's/\.flavour$//' -e 's/\.plist$//')")
+    [ -n "$title" ] || return 1
+    mkdir -p "$FLAVOURS"
+    target=$(unique_theme_path "$title" "$1")
+    cp -f "$1" "$target" && chmod 644 "$target" && IMPORTED=$((IMPORTED + 1))
+}
+
+import_flavours_library() {   # Flavours 2's SQLite library, one archive per theme, named from the metadata beside it.
+    out=$WORK/flavours-library
+    rm -rf "${WORK:?}/flavours-library"
+    mkdir -p "$out" "$FLAVOURS"
+    /usr/bin/sqlite3 "file:$1?immutable=1" "select writefile('$out/'||key||'.theme',data), writefile('$out/'||key||'.meta',metadata) from database2 where collection='myflavours';" >/dev/null || return 1
+    /usr/bin/osascript -l JavaScript -e 'ObjC.import("Foundation"); function run(argv) { var out = []; var fm = $.NSFileManager.defaultManager; var names = ObjC.deepUnwrap(fm.contentsOfDirectoryAtPathError($(argv[0]), null)); names.forEach(function (n) { if (!n.endsWith(".meta")) return; var d = $.NSData.dataWithContentsOfFile($(argv[0] + "/" + n)); var m = $.NSKeyedUnarchiver.unarchiveObjectWithData(d); var t = m.js ? m.objectForKey($("Title")) : null; if (t && t.js) out.push(n.replace(".meta", "") + "\t" + t.js); }); return out.join("\n"); }' "$out" 2>/dev/null > "$out/titles" || return 1
+    while IFS="$(printf '\t')" read -r key title; do
+        title=$(safe_theme_name "$title")
+        if [ -n "$title" ] && [ -f "$out/$key.theme" ]; then
+            target=$(unique_theme_path "$title" "$out/$key.theme")
+            mv -f "$out/$key.theme" "$target" && chmod 644 "$target" && IMPORTED=$((IMPORTED + 1))
+        fi
+    done < "$out/titles"
+    rm -rf "${WORK:?}/flavours-library"
+}
+
+import_flavours_dmg() {   # image: the app inside has its themes in one of two places
+    mount=$(attach "$1") && [ -n "$mount" ] || return 1
+    MOUNTS="$mount $MOUNTS"
+    for library in "$mount"/*.app/Contents/Resources/Flavours.library; do [ -f "$library" ] && import_flavours_library "$library"; done
+    for f in "$mount"/*.app/Contents/Resources/*Theme.plist "$mount"/*.flavour; do [ -f "$f" ] && import_flavour_file "$f"; done
+    detach_all
+}
+
+import_flavours_folder() {
+    for f in "$1"/*.flavour.xml "$1"/*.flavour; do [ -f "$f" ] && import_flavour_file "$f"; done
+}
+
+import_flavours() {   # download, zip, dmg, folder, or a single theme
+    mkdir -p "$WORK"
+    source=$1
+    if [ "$source" = download ]; then
+        need_space 2
+        source=$WORK/Flavours2-226.dmg
+        have=$(stat -f%z "$source" 2>/dev/null || echo 0)
+        [ "$have" -gt "$FLAVOURS_SIZE" ] && { rm -f "${WORK:?}/Flavours2-226.dmg"; have=0; }
+        if [ "$have" != "$FLAVOURS_SIZE" ]; then
+            say "downloading $FLAVOURS_URL"
+            /usr/bin/curl -fL --retry 10 --retry-delay 15 --retry-all-errors -C - -o "$source" "$FLAVOURS_URL" || fail "the Flavours download did not finish. It resumes from where it stopped when you try again."
+        fi
+        if [ "$(shasum -a 256 "$source" | cut -d' ' -f1)" != "$FLAVOURS_SHA256" ]; then rm -f "${WORK:?}/Flavours2-226.dmg"; fail "the Flavours download is not the expected file."; fi
+    fi
+    [ -e "$source" ] || fail "cannot find $source."
+    if [ -d "$source" ]; then import_flavours_folder "$source"
+    else
+        case "$source" in
+        *.zip | *.ZIP)
+            unpacked=$WORK/flavours-zip
+            rm -rf "${WORK:?}/flavours-zip"
+            mkdir -p "$unpacked"
+            ditto -x -k "$source" "$unpacked" || fail "could not unpack $source."
+            # The released app rather than the beta: the same themes, and only one is needed.
+            for name in Flavours2-226.dmg Flavours.dmg Flavours_Beta.dmg; do
+                found=$(find "$unpacked" -name "$name" -type f | head -1)
+                if [ -n "$found" ]; then import_flavours_dmg "$found"; break; fi
+            done
+            find "$unpacked" \( -name '*.flavour' -o -name '*.flavour.xml' \) -type f > "$WORK/flavours-found"
+            while IFS= read -r f; do import_flavour_file "$f"; done < "$WORK/flavours-found"
+            rm -f "${WORK:?}/flavours-found"
+            rm -rf "${WORK:?}/flavours-zip"
+            ;;
+        *.dmg | *.DMG) import_flavours_dmg "$source" || fail "could not open $source." ;;
+        *) import_flavour_file "$source" ;;
+        esac
+    fi
+    [ "$1" = download ] && rm -f "${WORK:?}/Flavours2-226.dmg"
+    say "imported $IMPORTED themes, skipped $DAMAGED unusable"
+    [ "$IMPORTED" -gt 0 ] || fail "$1 has no usable Flavours themes in it."
+}
+
+ask_flavour() {   # prints the choice; nothing if cancelled or nobody is there to ask
+    [ "$(id -u)" = 0 ] || return 0
+    u=$(console_uid) || return 0
+    launchctl asuser "$u" /usr/bin/osascript -l JavaScript -e 'ObjC.import("Foundation"); function run(argv) { var app = Application.currentApplication(); app.includeStandardAdditions = true; var names = ObjC.deepUnwrap($.NSFileManager.defaultManager.contentsOfDirectoryAtPathError($(argv[0]), null)).filter(function (n) { return n.endsWith(".theme"); }).map(function (n) { return n.replace(/\.theme$/, ""); }).sort(); app.activate(); var r = app.chooseFromList(["None (Mountain Lion)"].concat(names), { withTitle: "Lioness", withPrompt: "Choose a Flavours theme:" }); return r ? r[0] : ""; }' "$FLAVOURS" 2>/dev/null
+}
+
+apply_flavour() {   # r: into a root, where the renderer reads it
+    rm -f "${1:?}/$FLAVOUR_FILE"
+    selected=$(cat "$FLAVOURS/.selected" 2>/dev/null)
+    if [ -n "$selected" ] && [ -f "$FLAVOURS/$selected.theme" ]; then
+        mkdir -p "$1/$(dirname "$FLAVOUR_FILE")"
+        cp -f "$FLAVOURS/$selected.theme" "$1/$FLAVOUR_FILE" && chmod 644 "$1/$FLAVOUR_FILE"
+    fi
+}
+
+select_flavour() {   # name, none, or empty to ask
+    choice=${1:-}
+    [ -n "$choice" ] || choice=$(ask_flavour)
+    [ -n "$choice" ] || return 0
+    case "$choice" in none | "None (Mountain Lion)") choice="" ;; esac
+    [ -z "$choice" ] || [ -f "$FLAVOURS/$choice.theme" ] || fail "no theme named $choice."
+    mkdir -p "$FLAVOURS"
+    printf '%s\n' "$choice" > "$FLAVOURS/.selected"
+    apply_flavour "$ROOT_DIR"
+    say "theme: ${choice:-none}"
+    if [ "$HOME_DIR" = /Library/Lioness ] && [ "$(id -u)" = 0 ]; then
+        launchctl kickstart -k system/com.lioness.appkitd 2>/dev/null
+        tell_user notification "Theme changed. Quit and reopen apps to see it."
+    fi
 }
 
 install_atomically() {   # src dst mode
@@ -219,6 +356,16 @@ case "${1:-}" in
 --check)
     root_good "$ROOT_DIR"
     ;;
+flavours)
+    [ $# = 2 ] || { echo "usage: $0 flavours download | /path" >&2; exit 2; }
+    if [ "$HOME_DIR" = /Library/Lioness ] && [ "$(id -u)" != 0 ]; then echo "run with sudo" >&2; exit 1; fi
+    import_flavours "$2"
+    select_flavour ""
+    ;;
+flavour)
+    if [ "$HOME_DIR" = /Library/Lioness ] && [ "$(id -u)" != 0 ]; then echo "run with sudo" >&2; exit 1; fi
+    select_flavour "${2:-}"
+    ;;
 --job)
     IN_JOB=1
     mkdir -p "$HOME_DIR/log"
@@ -227,10 +374,18 @@ case "${1:-}" in
     [ -f "$SOURCE_FILE" ] || fail "nothing says which image to use."
     setup "$(cat "$SOURCE_FILE")"
     rm -f "${HOME_DIR:?}/setup.source"
+    # From the installer page. Themes are an extra, so failing here must not undo a working setup.
+    if [ -f "$HOME_DIR/flavours-incoming/source" ]; then
+        incoming=$(cat "$HOME_DIR/flavours-incoming/source")
+        IN_JOB=0
+        if ( import_flavours "$incoming" ); then select_flavour ""; else say "could not import themes from $incoming"; fi
+        IN_JOB=1
+        rm -rf "${HOME_DIR:?}/flavours-incoming"
+    fi
     end_job
     ;;
 "" | -h | --help)
-    sed -n '6,9p' "$0"
+    sed -n '6,12p' "$0"
     exit 2
     ;;
 *)

@@ -37,6 +37,24 @@ Relaunch apps to pick up the tweak. To restyle the menu bar straight away:
 pkill -x MenuBarAgent
 ```
 
+## Flavours themes
+
+Lioness can draw with [Flavours](http://getflavours.com) themes. On the installer's image page, choose to download Flavours 2 from the Internet Archive (331 MB, with 128 themes in its library), or pick a Flavours zip or DMG, a `.flavour` file, or a folder of themes. You'll then be asked which theme to use.
+
+To import later:
+
+```bash
+sudo /Library/Lioness/LionessSetup.sh flavours download
+```
+
+To switch theme, or go back to plain Mountain Lion:
+
+```bash
+sudo /Library/Lioness/LionessSetup.sh flavour
+```
+
+Quit and reopen apps to see the change. Lioness only reads theme data: no Flavours code runs, and no licence is used or needed. It paints each theme's layers itself, so results approximate Flavours rather than matching it exactly.
+
 ## Uninstall
 
 ```bash
@@ -69,7 +87,7 @@ To try a build without installing, run `Scripts/Appkitd.sh start`, then `Scripts
 
 ## Credits
 
-- [MacOSXArt](https://github.com/schm1dtmac/MacOSXArt) by schm1dtmac, for layout hooks (MIT, see `ThirdParty/MacOSXArt/LICENSE`)
+- [MacOSXArt](https://github.com/schm1dtmac/MacOSXArt) by schm1dtmac, for layout hooks (MIT, see the notice in `Dylib/LionLayout.m`)
 - [Snow Leopard Menu Bar Tweak](https://github.com/JesseAnguiano/Snow-Leopard-Menu-Bar-Tweak), for the approach to menu shape, shadow and arrows (MIT, Copyright (c) 2026 Snow Leopard Menu Bar Tweak contributors)
 - [Dobby](https://github.com/jmpews/Dobby) by jmpews, fetched at build time (Apache-2.0)
 
