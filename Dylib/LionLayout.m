@@ -75,6 +75,7 @@ SOFTWARE.
 static NSImage *cornerImage;
 bool LionessImageIsGlyph(NSImage *image);
 bool LionessSelectionIsLight(void);
+static void FollowAboutPanels(void);
 
 // The cut of Lucida Grande that Lion's interface used, which is what its text is measured in. It's in the system's own file, under a hidden name. AppKit copies font
 // descriptors, and those go by name, and a hidden name then comes back as Times. So the face is taken out of the file and given a name that can be asked for, for this process.
@@ -197,6 +198,7 @@ __attribute__((constructor)) static void LionLayoutInit(void) {
     cornerImage.resizingMode = NSImageResizingModeStretch;
 
     RegisterUIFonts();
+    FollowAboutPanels();
     static void *original[16];
     int n = 0;
     HookSymbol(NULL, "CTFontCreateWithFontDescriptor", (void *)HookFontCreate, (void **)&gOrigFontCreate);
@@ -379,16 +381,22 @@ static void GiveAboutPanelsATitleBar(void) {
     }
 }
 
-hook(NSApplication)
-- (void)orderFrontStandardAboutPanelWithOptions:(NSDictionary *)options {
-    ZKOrig(void, options);
-    GiveAboutPanelsATitleBar();
+// Not a ZKSwizzle hook: in apps that bring up AppKit late (Control Center, Notification Centre and other menu bar ones), its loader then lands on
+// NSApplication itself, which can't answer it, and they quit at launch.
+static void FollowAboutPanels(void) {
+    Class app = NSApplication.class;
+    for (NSString *name in @[ @"orderFrontStandardAboutPanelWithOptions:", @"orderFrontStandardAboutPanel:" ]) {
+        Method method = class_getInstanceMethod(app, NSSelectorFromString(name));
+        if (!method) continue;
+        void (*original)(id, SEL, id) = (void (*)(id, SEL, id))method_getImplementation(method);
+        SEL selector = method_getName(method);
+        IMP replacement = imp_implementationWithBlock(^(id self, id argument) {
+            original(self, selector, argument);
+            GiveAboutPanelsATitleBar();
+        });
+        if (!class_addMethod(app, selector, replacement, method_getTypeEncoding(method))) method_setImplementation(method, replacement);
+    }
 }
-- (void)orderFrontStandardAboutPanel:(id)sender {
-    ZKOrig(void, sender);
-    GiveAboutPanelsATitleBar();
-}
-endhook
 
 hook(NSWindow)
 - (id)initWithContentRect:(NSRect)contentRect styleMask:(NSWindowStyleMask)style backing:(NSBackingStoreType)backingStoreType defer:(bool)flag {
