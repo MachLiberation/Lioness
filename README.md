@@ -39,7 +39,7 @@ pkill -x MenuBarAgent
 
 ## Flavours themes
 
-Lioness can draw with [Flavours](http://getflavours.com) themes. On the installer's image page, choose to download Flavours 2 from the Internet Archive (331 MB, with 128 themes in its library), or pick a Flavours zip or DMG, a `.flavour` file, or a folder of themes. You'll then be asked which theme to use.
+Lioness can draw with [Flavours](http://getflavours.com) themes, or not. The installer's image page has a choice of Default, which is plain Mountain Lion and skips Flavours altogether, or Flavours 2, which downloads its DMG from archive.org (331 MB, with 128 themes in its library) and then asks which theme to use.
 
 To import later:
 
@@ -47,10 +47,16 @@ To import later:
 sudo /Library/Lioness/LionessSetup.sh flavours download
 ```
 
-To switch theme, or go back to plain Mountain Lion:
+To switch theme:
 
 ```bash
 sudo /Library/Lioness/LionessSetup.sh flavour
+```
+
+To go back to plain Mountain Lion:
+
+```bash
+sudo /Library/Lioness/LionessSetup.sh flavour default
 ```
 
 Quit and reopen apps to see the change. Lioness only reads theme data: no Flavours code runs, and no licence is used or needed. It paints each theme's layers itself, so results approximate Flavours rather than matching it exactly.

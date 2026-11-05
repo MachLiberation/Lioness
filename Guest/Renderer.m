@@ -58,6 +58,7 @@ static void SelectTheme(CFDictionaryRef options) {
 @public
     BOOL enabled, hasStroke, hasFill, hasInner, hasOuter, hasImage;
     double strokeWidth, blur, offsetX, offsetY, alpha;
+    int strokeSides;   // top 1, right 2, bottom 4, left 8
     int fillType, anchor, scaling, imageType;
     NSColor *strokeColor, *solidColor, *glossColor, *shadowColor;
     NSArray *colors, *locations;
@@ -86,6 +87,7 @@ static double FlavourNumber(NSCoder *c, NSString *key) {
     if ((hasStroke = [c containsValueForKey:@"StrokeColor"])) {
         strokeColor = [[c decodeObjectForKey:@"StrokeColor"] retain];
         strokeWidth = FlavourNumber(c, @"StrokeWidth");
+        strokeSides = [c containsValueForKey:@"StrokeSides"] ? (int)FlavourNumber(c, @"StrokeSides") : 15;
     }
     if ((hasFill = [c containsValueForKey:@"FillType"])) {
         fillType = (int)FlavourNumber(c, @"FillType");
@@ -248,23 +250,44 @@ static CGImageRef GrayMask(const uint8_t *alpha, size_t width, size_t height) {
     return image;
 }
 
+static float gFlavourOpacity = 1;   // for the next paint: a disabled control
 // Lion's art gives the shape. With keepDetail its marks survive too, as light and dark over the theme's colour.
 static void PaintFlavour(NSString *slot, bool keepDetail, void *pixels, uint32_t width, uint32_t height, uint32_t rowBytes, uint32_t scale, CGColorSpaceRef space) {
     if (!gFlavour) return;
     NSArray *layers = FlavourSlot(slot, 0);
     if (!layers.count) return;
+    bool isBar = [slot hasPrefix:@"Window/TitleBar/"];
     uint8_t *p = pixels;
     uint8_t *shape = malloc((size_t)width * height), *outside = malloc((size_t)width * height);
     uint8_t *art = malloc((size_t)rowBytes * height);
     if (!shape || !outside || !art) { free(shape); free(outside); free(art); return; }
     memcpy(art, p, (size_t)rowBytes * height);
     int top = -1, bottom = -1, left = (int)width, right = -1;
+    // Disabled and textured art is see-through all over. The shape is solid regardless, or a stroke, which is drawn on what's outside it, would flood the control. The soft
+    // shadow round Lion's art is well under the opacity of the art itself, and stays out.
+    int most = 0;
+    for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width; x++) if (p[y * rowBytes + x * 4 + 3] > most) most = p[y * rowBytes + x * 4 + 3];
+    int solidFrom = most * 45 / 100, clearBelow = most * 27 / 100;
+    // Textured art is thinner in some bands than at its rim, and inside the rim is inside, however thin.
+    uint8_t *within = calloc((size_t)width * height, 1);
+    for (uint32_t y = 0; within && y < height; y++) {
+        int first = -1, last = -1;
+        for (uint32_t x = 0; x < width; x++) if (p[y * rowBytes + x * 4 + 3] >= solidFrom) { if (first < 0) first = (int)x; last = (int)x; }
+        for (int x = first; first >= 0 && x <= last; x++) within[y * width + x] = 1;
+    }
+    for (uint32_t x = 0; within && x < width; x++) {
+        int first = -1, last = -1;
+        for (uint32_t y = 0; y < height; y++) if (p[y * rowBytes + x * 4 + 3] >= solidFrom) { if (first < 0) first = (int)y; last = (int)y; }
+        for (int y = first; first >= 0 && y <= last; y++) within[y * width + x] = 1;
+    }
     for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width; x++) {
-        uint8_t a = p[y * rowBytes + x * 4 + 3];
+        int raw = p[y * rowBytes + x * 4 + 3];
+        uint8_t a = raw >= solidFrom || (within && within[y * width + x]) ? 255 : raw <= clearBelow ? 0 : (uint8_t)((raw - clearBelow) * 255 / (solidFrom - clearBelow));
         shape[y * width + x] = a;
         outside[y * width + x] = 255 - a;
         if (a > 8) { if (top < 0) top = (int)y; bottom = (int)y; if ((int)x < left) left = (int)x; if ((int)x > right) right = (int)x; }
     }
+    free(within);
     if (top < 0) { free(shape); free(outside); free(art); return; }
     CGImageRef shapeImage = GrayMask(shape, width, height), outsideImage = GrayMask(outside, width, height);
     CGContextRef cg = CGBitmapContextCreate(pixels, width, height, 8, rowBytes, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
@@ -300,18 +323,28 @@ static void PaintFlavour(NSString *slot, bool keepDetail, void *pixels, uint32_t
                 CGContextDrawLinearGradient(cg, gradient, CGPointMake(0, height - top), CGPointMake(0, height - bottom - 1), kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation);
                 CGGradientRelease(gradient);
                 free(stops);
+            } else if (l->fillType == 1) {
+                // Gloss: a light over the upper half, on whatever is beneath it. Its solid colour isn't painted.
+                CGFloat half = (bottom - top + 1) / 2.0;
+                CGColorRef from = FlavourColor([(l->glossColor ?: NSColor.whiteColor) colorWithAlphaComponent:0.35]), to = FlavourColor([(l->glossColor ?: NSColor.whiteColor) colorWithAlphaComponent:0.12]);
+                if (from && to) {
+                    const void *pair[2] = { from, to };
+                    CFArrayRef list = CFArrayCreate(NULL, pair, 2, &kCFTypeArrayCallBacks);
+                    CGGradientRef gradient = CGGradientCreateWithColors(space, list, NULL);
+                    CGContextSaveGState(cg);
+                    CGContextClipToRect(cg, CGRectMake(0, height - top - half, width, half));
+                    CGContextDrawLinearGradient(cg, gradient, CGPointMake(0, height - top), CGPointMake(0, height - top - half), 0);
+                    CGContextRestoreGState(cg);
+                    CGGradientRelease(gradient);
+                    CFRelease(list);
+                }
+                if (from) CGColorRelease(from);
+                if (to) CGColorRelease(to);
             } else if (l->solidColor) {
                 CGColorRef c = FlavourColor(l->solidColor);
                 CGContextSetFillColorWithColor(cg, c);
                 CGContextFillRect(cg, all);
                 if (c) CGColorRelease(c);
-                // Glossy: the upper half lit.
-                if (l->fillType == 1 && l->glossColor) {
-                    CGColorRef gloss = FlavourColor([l->glossColor colorWithAlphaComponent:0.35]);
-                    CGContextSetFillColorWithColor(cg, gloss);
-                    CGContextFillRect(cg, CGRectMake(0, height - top - (bottom - top + 1) / 2, width, (bottom - top + 1) / 2));
-                    if (gloss) CGColorRelease(gloss);
-                }
             }
         } else if (l->hasInner) {
             CGColorRef color = FlavourColor(l->shadowColor);
@@ -327,8 +360,11 @@ static void PaintFlavour(NSString *slot, bool keepDetail, void *pixels, uint32_t
         } else if (l->hasStroke && l->strokeWidth > 0) {
             CGColorRef color = FlavourColor(l->strokeColor);
             CGFloat w = l->strokeWidth * scale;
-            CGSize offsets[4] = { { w, 0 }, { -w, 0 }, { 0, w }, { 0, -w } };
+            // Each side is what's outside the shape, moved in by the stroke's width. Row 0 is the top of the bitmap, the largest y here.
+            CGSize offsets[4] = { { 0, -w }, { -w, 0 }, { 0, w }, { w, 0 } };
             for (int i = 0; i < 4; i++) {
+                if (!(l->strokeSides & (1 << i))) continue;
+                if ((i == 1 || i == 3) && isBar) continue;   // drawn far wider than any window, so it has no right edge to match the left
                 CGContextSaveGState(cg);
                 CGContextClipToMask(cg, CGRectOffset(all, offsets[i].width, offsets[i].height), outsideImage);
                 CGContextSetFillColorWithColor(cg, color);
@@ -338,12 +374,34 @@ static void PaintFlavour(NSString *slot, bool keepDetail, void *pixels, uint32_t
             if (color) CGColorRelease(color);
         }
     }
-    if (keepDetail) {
-        CGContextSetBlendMode(cg, kCGBlendModeLuminosity);
-        CGContextDrawImage(cg, all, artImage);
-    }
     CGContextRestoreGState(cg);
     CGContextFlush(cg);
+    if (gFlavourOpacity < 1) {
+        for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width * 4; x++) p[y * rowBytes + x] = (uint8_t)(p[y * rowBytes + x] * gFlavourOpacity);
+        gFlavourOpacity = 1;
+    }
+    if (keepDetail) {
+        // Lion's marks, as how far each pixel is from the art's usual brightness: the theme's colour stays, where taking the art's brightness outright would turn it to Lion's.
+        uint32_t histogram[256] = {};
+        uint32_t total = 0;
+        for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width; x++) {
+            const uint8_t *a = art + y * rowBytes + x * 4;
+            if (a[3] < 128) continue;
+            histogram[(a[0] * 29 + a[1] * 150 + a[2] * 77) / 256 * 255 / a[3]]++;
+            total++;
+        }
+        uint32_t seen = 0, usual = 0;
+        for (; usual < 255 && seen + histogram[usual] < total / 2; usual++) seen += histogram[usual];
+        for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width; x++) {
+            const uint8_t *a = art + y * rowBytes + x * 4;
+            uint8_t *o = p + y * rowBytes + x * 4;
+            if (a[3] < 128 || !o[3]) continue;
+            int difference = (int)((a[0] * 29 + a[1] * 150 + a[2] * 77) / 256 * 255 / a[3]) - (int)usual;
+            // A dark mark on a dark theme would vanish.
+            if (difference < 0 && (o[0] * 29 + o[1] * 150 + o[2] * 77) / 256 * 255 / o[3] < 90) difference = -difference;
+            for (int c = 0; c < 3; c++) { int v = o[c] + difference * o[3] / 255; o[c] = v < 0 ? 0 : v > o[3] ? o[3] : (uint8_t)v; }
+        }
+    }
     CGImageRelease(artImage);
     CGDataProviderRelease(artProvider);
     CGImageRelease(shapeImage);
@@ -364,6 +422,7 @@ static NSString *FlavourSlotForOptions(CFDictionaryRef options, bool *keepDetail
     NSString *widget = (NSString *)CFDictionaryGetValue(options, CFSTR("widget"));
     NSString *state = (NSString *)CFDictionaryGetValue(options, CFSTR("state"));
     *keepDetail = false;
+    gFlavourOpacity = [state isEqual:@"disabled"] ? 0.55f : 1;
     if ([widget isEqual:@"kCUIWidgetMenuBar"]) return @"Menu/MenuBar/MenuBar";
     if ([widget isEqual:@"kCUIWidgetMenuTitle"]) return @"Menu/MenuBar/MenuSelection";
     if ([widget isEqual:@"kCUIWidgetMenu"]) return @"Menu/MenuItems/MenuBackground";
@@ -380,7 +439,12 @@ static NSString *FlavourSlotForOptions(CFDictionaryRef options, bool *keepDetail
     if (lights[widget]) {
         NSString *light = [state isEqual:@"pressed"] ? @"Pressed" : [state isEqual:@"rollover"] ? @"Hover" : IsInactive(options) ? @"Inactive" : @"Active";
         *keepDetail = [light isEqual:@"Hover"];   // the glyph inside
-        return [NSString stringWithFormat:@"Window/TitleBar%@Button/%@", lights[widget], light];
+        // Plenty of themes leave out a state or two. Lion's art would then show for just those, so a light falls back on its own active state, then on the close button's.
+        for (NSString *candidate in @[ [NSString stringWithFormat:@"Window/TitleBar%@Button/%@", lights[widget], light],
+                                       [NSString stringWithFormat:@"Window/TitleBar%@Button/Active", lights[widget]],
+                                       [NSString stringWithFormat:@"Window/TitleBarCloseButton/%@", light], @"Window/TitleBarCloseButton/Active" ])
+            if (FlavourSlot(candidate, 0).count) return candidate;
+        return nil;
     }
     static NSSet *plain, *detailed;
     if (!plain) {

@@ -135,6 +135,7 @@ static bool SurfaceIsDark(NSDictionary *options, uint32_t width, uint32_t height
 // A control's label goes with the art actually put on that control, which is the only sure way to know what it sits on: the same widget
 // can draw differently by style. Recorded on the segment or control the layer belongs to, and redrawn if that changes the answer.
 static char gOnDarkKey;
+static void RefreshSegmentContent(NSView *item);
 static NSColor *ThemeWindowColor(void);
 static bool ContentIsDark(void);
 static void RedrawLabels(NSView *view) {
@@ -156,6 +157,13 @@ static void NoteArtBrightness(CALayer *layer, CGImageRef art) {
             objc_setAssociatedObject(view, &gOnDarkKey, @(dark), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             RedrawLabels(view);
             // A button settles its label's colour when its title is set, so that has to happen again, though not in the middle of AppKit's layer update.
+            if (segment && [view isKindOfClass:segment]) {
+                NSView *item = [view retain];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    RefreshSegmentContent(item);
+                    [item release];
+                });
+            }
             if ([view isKindOfClass:NSButton.class]) {
                 NSButton *button = (NSButton *)[view retain];
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -366,6 +374,18 @@ static void UpdateTitlebarBackground(NSView *view) {
     static NSMutableDictionary *bars = [NSMutableDictionary new];
     NSString *key = [NSString stringWithFormat:@"%u %u %u", height, r.scale, r.state];
     id contents = bars[key];
+    // A theme's bar is drawn at the bar's real height, so its strokes stay thin and its gradient and images are as it means them.
+    NSString *themedSlot = ThemeSurface(@"Window/TitleBar/TitleBar") ? (r.state == LionessStateActive ? @"Window/TitleBar/TitleBar" : @"Window/TitleBar/TitleBarInactive") : nil;
+    if (!contents && themedSlot) {
+        CGImageRef drawn = LionessCopyDrawnImage((__bridge CFDictionaryRef)@{ @"widget": @"lioness.slot", @"lioness.path": themedSlot }, kBarWidthPoints, height, r.scale);
+        CGImageRef built = drawn ? CreateLayerContents(drawn, CGSizeMake(kBarWidthPoints, height), r.scale) : NULL;
+        if (drawn) CGImageRelease(drawn);
+        if (built) {
+            contents = (__bridge id)built;
+            bars[key] = contents;
+            CGImageRelease(built);
+        }
+    }
     if (!contents) {
         CGImageRef built = CreateSpeckledBar(bar, r.width, r.height, height, r.scale);
         if (!built) return;
@@ -476,6 +496,7 @@ static void UpdateTitlebarLine(NSView *view) {
     if (!layer || !color) return;
     CALayer *line = nil;
     for (CALayer *sub in layer.sublayers) if ([sub.name isEqual:kTitlebarLineName]) line = sub;
+    if (ThemeSurface(@"Window/TitleBar/TitleBar")) { line.hidden = YES; return; }   // its own strokes say what's along that edge
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     if (!line) {
@@ -696,9 +717,12 @@ static void AnimateFrames(CALayer *layer, NSDictionary *options, uint32_t width,
 // picture. The selection's blue is the art called FinderSideBar; the art called SideBarSelection is only its grey form, which
 // is also what FinderSideBar gives when inactive. Rounded selection masks are modern: Lion's runs edge to edge.
 static const void *const kMaterialKey = &kMaterialKey;
+static bool SidebarIsDark(void);
 static void UpdateMaterial(NSVisualEffectView *view) {
     NSWindow *window = view.window;
     if (!window) return;
+    // Text in a sidebar is often SwiftUI's, which goes by the appearance and asks no colour of anyone.
+    if (view.material == NSVisualEffectMaterialSidebar && SidebarIsDark() && !view.appearance) view.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     bool selection = view.material == NSVisualEffectMaterialSelection;
     if (!selection && view.material != NSVisualEffectMaterialSidebar) {
         // Every other material is a modern live surface, with Lion's plain window behind it. Not in a see-through window, where it may be all there is, nor the ones
@@ -1143,6 +1167,7 @@ static bool SegmentsAreDark(NSSegmentedCell *cell) {
 }
 // A theme can make any segment dark, selected or not.
 static bool SegmentIsOnDark(NSView *item, NSSegmentedCell *cell, BOOL selected) {
+    if (ThemeSurface(@"Controls/Aqua/Normal")) return ArtBehindIsDark(item);   // what SegmentsAreDark knows is Lion's styles
     return (selected && SegmentsAreDark(cell)) || ArtBehindIsDark(item);
 }
 // AppKit's own choice of how a segment's label and image render. Dark gives white on Lion's dark selection.
@@ -1243,15 +1268,36 @@ static BOOL HookSegmentEmphasized(id self, SEL _cmd) {
 static BOOL (*gOrigDisabledText)(NSButtonCell *, SEL);
 static BOOL HookDisabledText(NSButtonCell *self, SEL _cmd) { return !self.isEnabled; }
 static id (*gOrigSegmentLabelAppearance)(id, SEL, id);
+// AppKit asks for those appearances when it makes a segment's label and icon, and not again when the segment is selected, so they would keep the look they started with.
+static void RefreshSegmentContent(NSView *item) {
+    NSAppearance *look = SegmentContentAppearance(item, nil);
+    if (!look) return;
+    for (const char *name : (const char *[]){ "_labelView", "_imageView", "_menuIndicatorView" }) {
+        Ivar ivar = class_getInstanceVariable(item.class, name);
+        NSView *content = ivar ? object_getIvar(item, ivar) : nil;
+        if (!content) continue;
+        content.appearance = look;
+        content.needsDisplay = YES;
+    }
+}
+static void (*gOrigSegmentSetSelected)(NSView *, SEL, BOOL);
+static void HookSegmentSetSelected(NSView *self, SEL _cmd, BOOL selected) {
+    gOrigSegmentSetSelected(self, _cmd, selected);
+    RefreshSegmentContent(self);
+}
 static id HookSegmentLabelAppearance(id self, SEL _cmd, id view) { return SegmentContentAppearance(self, gOrigSegmentLabelAppearance(self, _cmd, view)); }
 static id (*gOrigSegmentImageAppearance)(id, SEL, id);
 static id HookSegmentImageAppearance(id self, SEL _cmd, id view) { return SegmentContentAppearance(self, gOrigSegmentImageAppearance(self, _cmd, view)); }
 static NSBackgroundStyle (*gOrigTabStyle)(NSTabViewItem *, SEL);
+// Lion's selected tab is dark and its others light. A theme's are whatever its controls are.
+static bool ThemedTabIsDark(NSTabViewItem *item) { return ColorIsDark(ThemeSurface(item.tabState == NSSelectedTab ? @"Controls/Aqua/Active" : @"Controls/Aqua/Normal")); }
 static NSBackgroundStyle HookTabStyle(NSTabViewItem *self, SEL _cmd) {
+    if (ThemeSurface(@"Controls/Aqua/Normal")) return ThemedTabIsDark(self) ? NSBackgroundStyleEmphasized : NSBackgroundStyleNormal;
     return self.tabState == NSSelectedTab ? NSBackgroundStyleEmphasized : gOrigTabStyle(self, _cmd);
 }
 static NSColor *(*gOrigTabLabelColor)(NSTabViewItem *, SEL);
 static NSColor *HookTabLabelColor(NSTabViewItem *self, SEL _cmd) {
+    if (ThemeSurface(@"Controls/Aqua/Normal")) return ThemedTabIsDark(self) ? NSColor.whiteColor : NSColor.blackColor;
     return self.tabState == NSSelectedTab ? NSColor.whiteColor : gOrigTabLabelColor(self, _cmd);
 }
 
@@ -1521,6 +1567,29 @@ static void UseLionColors(void) {
         NSColor *color = [[NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1] retain];
         method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id) { return color; }));
     }
+    // The accent, from the theme's own controls, and its highlight where it has one. These are what paint selected toggles, slider fills and text selections.
+    static const struct { const char *name; NSString *slot; } accents[] = {
+        { "controlAccentColor", @"Controls/Aqua/Active" }, { "alternateSelectedControlColor", @"Controls/Aqua/Active" }, { "selectedContentBackgroundColor", @"Controls/Aqua/Active" },
+        { "keyboardFocusIndicatorColor", @"Controls/Aqua/Active" }, { "selectedTextBackgroundColor", @"Others/Highlight/Selection" }, { "selectedControlColor", @"Others/Highlight/Selection" },
+    };
+    for (const auto &c : accents) {
+        Method method = class_getClassMethod(NSColor.class, sel_registerName(c.name));
+        if (!method) continue;
+        NSString *slot = c.slot;
+        NSColor *(*usual)(id, SEL) = (NSColor *(*)(id, SEL))method_getImplementation(method);
+        SEL name = method_getName(method);
+        method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id self) { return ThemeSurface(slot) ?: usual(self, name); }));
+    }
+    for (const char *name : (const char *[]){ "alternateSelectedControlTextColor", "selectedMenuItemTextColor" }) {
+        Method method = class_getClassMethod(NSColor.class, sel_registerName(name));
+        if (!method) continue;
+        NSColor *(*usual)(id, SEL) = (NSColor *(*)(id, SEL))method_getImplementation(method);
+        SEL selector = method_getName(method);
+        method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id self) {
+            NSColor *accent = ThemeSurface(@"Controls/Aqua/Active");
+            return accent && !ColorIsDark(accent) ? NSColor.blackColor : usual(self, selector);
+        }));
+    }
     // A theme's content colours, looked up when asked for: nothing can be asked of the daemon this early.
     static const struct { const char *name; NSColor *(*themed)(void); } surfaces[] = { { "windowBackgroundColor", ThemeWindowColor }, { "controlBackgroundColor", ThemeListColor } };
     for (const auto &c : surfaces) {
@@ -1543,14 +1612,17 @@ static void UseLionColors(void) {
             return ContentIsDark() && ColorIsDark(list) ? [list blendedColorWithFraction:0.25 ofColor:NSColor.whiteColor] : usual(self, selector);
         }));
     }
-    static const struct { const char *name; CGFloat alpha; } labels[] = { { "labelColor", 1 }, { "secondaryLabelColor", 0.55 }, { "tertiaryLabelColor", 0.25 }, { "quaternaryLabelColor", 0.1 } };
+    static const struct { const char *name; CGFloat alpha; } labels[] = { { "labelColor", 1 }, { "secondaryLabelColor", 0.55 }, { "tertiaryLabelColor", 0.25 }, { "quaternaryLabelColor", 0.1 }, { "windowFrameTextColor", 1 } };
     for (const auto &c : labels) {
         Method method = class_getClassMethod(NSColor.class, sel_registerName(c.name));
         if (!method) continue;
         NSColor *light = [[NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:c.alpha] retain];
         NSColor *(*usual)(id, SEL) = (NSColor *(*)(id, SEL))method_getImplementation(method);
         SEL name = method_getName(method);
-        method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id self) { return ContentIsDark() ? light : usual(self, name); }));
+        method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id self) {
+            // A theme's dark window, or an app or a sidebar that has asked to be dark. Lion's colours are one fixed value each, and would stay black.
+            return ContentIsDark() || [NSAppearance.currentDrawingAppearance.name containsString:@"Dark"] ? light : usual(self, name);
+        }));
     }
     static const char *const alternating[] = { "alternatingContentBackgroundColors", "controlAlternatingRowBackgroundColors" };
     for (const char *name : alternating) {
@@ -1725,6 +1797,8 @@ static NSDictionary *SidebarOptions(bool selection) {
 }
 // Lion's sidebar is light and its selection dark, and labels are left to AppKit. A theme can have a dark sidebar, whose selection is whatever it is.
 static bool SidebarIsDark(void) { return SurfaceIsDark(SidebarOptions(false), 64, 22); }
+// A theme's selection can be light, and a light one wants a dark label, whatever the sidebar under it.
+extern "C" bool LionessSelectionIsLight(void) { return ThemeSurface(@"Window/Sidebar/Selection") && !SurfaceIsDark(SidebarOptions(true), 64, 22); }
 static NSColor *ThemedSidebarText(bool selected) {
     if (!SidebarIsDark()) return nil;
     return !selected || SurfaceIsDark(SidebarOptions(true), 64, 22) ? NSColor.whiteColor : NSColor.blackColor;
@@ -2194,6 +2268,7 @@ static void Install(void) {
     Override("NSSegmentItemView", sel_registerName("_preferredAppearanceForSegmentLabelView:"), (IMP)HookSegmentLabelAppearance, &gOrigSegmentLabelAppearance);
     Override("NSSegmentItemView", sel_registerName("_preferredAppearanceForSegmentImageView:"), (IMP)HookSegmentImageAppearance, &gOrigSegmentImageAppearance);
     Override("NSSegmentItemView", sel_registerName("emphasized"), (IMP)HookSegmentEmphasized, &gOrigSegmentEmphasized);
+    Override("NSSegmentItemView", @selector(setSelected:), (IMP)HookSegmentSetSelected, &gOrigSegmentSetSelected);
     Override("NSSegmentItemLabelCell", sel_registerName("_textAttributes"), (IMP)HookLabelAttributes, &gOrigLabelAttributes);
     Override("NSSegmentItemLabelCell", sel_registerName("_contentStyleOverride"), (IMP)NoContentStyle, (id (**)(id, SEL))NULL);
     Override("NSSegmentItemLabelCell", sel_registerName("interiorBackgroundStyle"), (IMP)HookLabelStyle, &gOrigLabelStyle);

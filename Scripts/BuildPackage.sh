@@ -20,7 +20,7 @@ mkdir -p "$HOME_STAGE/tweak" "$BUNDLE/Contents/MacOS"
 
 cp "$BUILD/appkitd" "$RENDERER" "$HOME_STAGE/"
 cp "$BUILD/libLionessAqua.dylib" "$HOME_STAGE/tweak/"
-cp "$ROOT/Package/LionessSetup.sh" "$ROOT/Package/Uninstall.sh" "$ROOT/Package/libLionessAqua.dylib.blacklist" \
+cp "$ROOT/Package/LionessSetup.sh" "$ROOT/Package/Uninstall.sh" "$ROOT/Package/libLionessAqua.dylib.blacklist" "$ROOT/Package/flavours-names.txt" \
    "$ROOT/Package/com.lioness.appkitd.plist" "$ROOT/Package/com.lioness.setup.plist" "$HOME_STAGE/"
 codesign -f -s - "$HOME_STAGE/appkitd" "$HOME_STAGE/tweak/libLionessAqua.dylib"
 # The daemon runs as nobody, and everything it reads must be readable by it.

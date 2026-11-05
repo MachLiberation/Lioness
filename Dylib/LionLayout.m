@@ -74,6 +74,7 @@ SOFTWARE.
 
 static NSImage *cornerImage;
 bool LionessImageIsGlyph(NSImage *image);
+bool LionessSelectionIsLight(void);
 
 // The cut of Lucida Grande that Lion's interface used, which is what its text is measured in. It's in the system's own file, under a hidden name. AppKit copies font
 // descriptors, and those go by name, and a hidden name then comes back as Times. So the face is taken out of the file and given a name that can be asked for, for this process.
@@ -613,6 +614,7 @@ endhook
 
 hook(NSTableRowView)
 -(NSBackgroundStyle)interiorBackgroundStyle {
+    if ([(NSTableRowView*)self isSelected] && LionessSelectionIsLight()) return NSBackgroundStyleNormal;
     return ([(NSTableRowView*)self isSelected] && [(id)self _needsSelectionBlurBackgroundView]) ? NSBackgroundStyleEmphasized : ZKOrig(NSBackgroundStyle);
 }
 endhook

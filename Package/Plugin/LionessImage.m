@@ -25,7 +25,7 @@ static BOOL ExistingRootIsGood(void) {
     NSView *_view;
     NSButton *_keep, *_download, *_own, *_choose;
     NSTextField *_picked;
-    NSString *_path, *_themes;
+    NSString *_path;
     NSPopUpButton *_themeChoice;
     BOOL _ammonia;
 }
@@ -89,9 +89,8 @@ static NSTextField *Text(NSString *string, NSRect frame, CGFloat size, NSColor *
     [_view addSubview:_picked];
     [_view addSubview:Text(@"Flavours themes:", NSMakeRect(16, 12, 96, 16), 11, NSColor.labelColor)];
     _themeChoice = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(112, 6, 288, 26) pullsDown:NO];
-    [_themeChoice addItemsWithTitles:@[ @"None", @"Download Flavours 2 (331 MB, Internet Archive)", @"Choose a zip, DMG, theme or folder…" ]];
-    _themeChoice.target = self;
-    _themeChoice.action = @selector(themeChoiceChanged:);
+    // First, so it's what a plain click through gets.
+    [_themeChoice addItemsWithTitles:@[ @"Default (Mountain Lion)", @"Flavours 2 (331 MB, from archive.org)" ]];
     [_view addSubview:_themeChoice];
     (_keep ?: _download).state = NSControlStateValueOn;
     [self update];
@@ -118,18 +117,6 @@ static NSTextField *Text(NSString *string, NSRect frame, CGFloat size, NSColor *
     [self update];
 }
 
-- (void)themeChoiceChanged:(id)sender {
-    _themes = nil;
-    if (_themeChoice.indexOfSelectedItem != 2) return;
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowedFileTypes = @[ @"zip", @"dmg", @"flavour", @"xml" ];
-    panel.canChooseDirectories = YES;
-    panel.message = @"Choose a Flavours zip or DMG, a theme, or a folder of themes";
-    if ([panel runModal] != NSModalResponseOK) { [_themeChoice selectItemAtIndex:0]; return; }
-    _themes = panel.URL.path;
-    [_themeChoice itemAtIndex:2].title = _themes.lastPathComponent;
-}
-
 - (BOOL)shouldExitPane:(InstallerSectionDirection)dir {
     if (dir != InstallerDirectionForward) return YES;
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -144,17 +131,8 @@ static NSTextField *Text(NSString *string, NSRect frame, CGFloat size, NSColor *
         if (clonefile(_path.fileSystemRepresentation, clone.fileSystemRepresentation, 0) != 0)
             NSLog(@"Lioness: no clone of %@: %s", _path, strerror(errno));
     }
-    NSString *themeChoice = _themeChoice.indexOfSelectedItem == 1 ? @"download" : _themes;
-    if (themeChoice) {
-        if (_themes) {
-            // Readable by the root job, as with the image. A clone costs no space; a folder is cloned as a whole.
-            NSString *name = _themes.pathExtension.length ? [@"flavours-source" stringByAppendingPathExtension:_themes.pathExtension] : @"flavours-source";
-            NSString *clone = [kChoices stringByAppendingPathComponent:name];
-            if (clonefile(_themes.fileSystemRepresentation, clone.fileSystemRepresentation, 0) != 0)
-                NSLog(@"Lioness: no clone of %@: %s", _themes, strerror(errno));
-        }
-        [[themeChoice stringByAppendingString:@"\n"] writeToFile:[kChoices stringByAppendingPathComponent:@"flavours"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
+    NSString *themeChoice = _themeChoice.indexOfSelectedItem == 1 ? @"download\n" : @"default\n";
+    [themeChoice writeToFile:[kChoices stringByAppendingPathComponent:@"flavours"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSError *error = nil;
     if (![choice writeToFile:[kChoices stringByAppendingPathComponent:@"choice"] atomically:YES encoding:NSUTF8StringEncoding error:&error])
         NSLog(@"Lioness: cannot record the choice: %@", error);   // postinstall asks instead

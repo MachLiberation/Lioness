@@ -63,13 +63,9 @@ fi
 # Themes: optional, and separate from the image.
 if [ -f "$CHOICES/flavours" ] && [ -n "$CONSOLE" ] && [ "$(stat -f%u "$CHOICES/flavours")" = "$CONSOLE" ]; then
     THEMES=$(sed -n 1p "$CHOICES/flavours")
+    case "$THEMES" in download | default) ;; *) THEMES=default ;; esac
     INCOMING="$HOME_DIR/flavours-incoming"
     mkdir -p "$INCOMING"
-    CLONE=$(find "$CHOICES" -maxdepth 1 -name 'flavours-source*' | head -1)
-    if [ -n "$CLONE" ] && [ "$(stat -f%u "$CLONE")" = "$CONSOLE" ]; then
-        THEMES="$INCOMING/$(basename "$CLONE")"
-        mv -f "$CLONE" "$THEMES"
-    fi
     printf '%s\n' "$THEMES" > "$INCOMING/source"
 fi
 rm -rf /Users/Shared/.lioness-setup
