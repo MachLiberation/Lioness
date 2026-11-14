@@ -15,7 +15,8 @@ touch "$HOME_DIR/log/setup.log"; chown root:wheel "$HOME_DIR/log/setup.log"
 
 # Remove what 1.x installed. Files only: stopping those jobs under a running session can take the session down.
 # They end at the next restart.
-rm -rf "${HOME_DIR:?}/lion-root" "${HOME_DIR:?}/state"
+rm -rf "${HOME_DIR:?}/lion-root" "${HOME_DIR:?}/state" "${HOME_DIR:?}/flavours" "${HOME_DIR:?}/flavours-incoming"
+rm -f "${HOME_DIR:?}/ml-root/usr/share/lioness/flavour.theme"
 rm -f "${HOME_DIR:?}/lioness-setup.sh"
 rm -f "${HOME_DIR:?}/server.enabled" "${HOME_DIR:?}/server.autoshow" "${HOME_DIR:?}/lioness-run" "${HOME_DIR:?}/lioness-broker" \
       "${HOME_DIR:?}/libLionessServer.dylib.whitelist" "${HOME_DIR:?}/libLionessDock.dylib.whitelist" "${HOME_DIR:?}/ammonia_global.whitelist"
@@ -59,14 +60,6 @@ if [ -f "$CHOICES/choice" ] && [ -n "$CONSOLE" ] && [ "$(stat -f%u "$CHOICES/cho
         [ -n "$SOURCE" ] || SOURCE=$PICKED
         ;;
     esac
-fi
-# Themes: optional, and separate from the image.
-if [ -f "$CHOICES/flavours" ] && [ -n "$CONSOLE" ] && [ "$(stat -f%u "$CHOICES/flavours")" = "$CONSOLE" ]; then
-    THEMES=$(sed -n 1p "$CHOICES/flavours")
-    case "$THEMES" in download | default) ;; *) THEMES=default ;; esac
-    INCOMING="$HOME_DIR/flavours-incoming"
-    mkdir -p "$INCOMING"
-    printf '%s\n' "$THEMES" > "$INCOMING/source"
 fi
 rm -rf /Users/Shared/.lioness-setup
 [ "$SOURCE" = keep ] && ! sh "$SETUP" --check && SOURCE=""

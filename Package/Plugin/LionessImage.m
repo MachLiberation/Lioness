@@ -26,7 +26,6 @@ static BOOL ExistingRootIsGood(void) {
     NSButton *_keep, *_download, *_own, *_choose;
     NSTextField *_picked;
     NSString *_path;
-    NSPopUpButton *_themeChoice;
     BOOL _ammonia;
 }
 @end
@@ -87,11 +86,6 @@ static NSTextField *Text(NSString *string, NSRect frame, CGFloat size, NSColor *
     _picked = Text(@"", NSMakeRect(126, y - 46, 274, 16), 11, secondary);
     _picked.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [_view addSubview:_picked];
-    [_view addSubview:Text(@"Flavours themes:", NSMakeRect(16, 12, 96, 16), 11, NSColor.labelColor)];
-    _themeChoice = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(112, 6, 288, 26) pullsDown:NO];
-    // First, so it's what a plain click through gets.
-    [_themeChoice addItemsWithTitles:@[ @"Default (Mountain Lion)", @"Flavours 2 (331 MB, from archive.org)" ]];
-    [_view addSubview:_themeChoice];
     (_keep ?: _download).state = NSControlStateValueOn;
     [self update];
     return _view;
@@ -131,8 +125,6 @@ static NSTextField *Text(NSString *string, NSRect frame, CGFloat size, NSColor *
         if (clonefile(_path.fileSystemRepresentation, clone.fileSystemRepresentation, 0) != 0)
             NSLog(@"Lioness: no clone of %@: %s", _path, strerror(errno));
     }
-    NSString *themeChoice = _themeChoice.indexOfSelectedItem == 1 ? @"download\n" : @"default\n";
-    [themeChoice writeToFile:[kChoices stringByAppendingPathComponent:@"flavours"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSError *error = nil;
     if (![choice writeToFile:[kChoices stringByAppendingPathComponent:@"choice"] atomically:YES encoding:NSUTF8StringEncoding error:&error])
         NSLog(@"Lioness: cannot record the choice: %@", error);   // postinstall asks instead
