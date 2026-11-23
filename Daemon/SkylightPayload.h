@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #define WS_STATE_MAGIC     0x4C494F4E534B5931ULL  // "LIONSKY1"
-#define WS_STATE_VERSION   6U
+#define WS_STATE_VERSION   7U
 #define WS_PAYLOAD_PAGE_SZ 0x4000U                // 16 KB Apple Silicon page
 #define WS_BAR_W_2X        2U
 #define WS_BAR_H_2X        42U                    // Pure 42 px SArtFile 0x4e50+0x4e8d gradient (hairline is separate 1pt layer)

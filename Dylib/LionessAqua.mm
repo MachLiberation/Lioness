@@ -2775,19 +2775,41 @@ static void DressMenuBars(void) {
     else if (selecting && !gBarSelectionTimer) gBarSelectionTimer = MainQueueTimer(1.0 / 30, ^{ DressMenuBars(); [CATransaction flush]; });
 }
 
-// Each selection is a new layer. Dressed here, in the transaction that adds it, it never reaches the screen as AppKit made it.
+static bool gDressingBar;
+static void DressMenuBarWindowImmediate(NSWindow *window) {
+    if (!window || gDressingBar) return;
+    if (window.frame.size.height > 60 || !IsNamed(window, "DisplayItemAppKitWindow")) return;
+    gDressingBar = true;
+    DressMenuBarWindow(window);
+    gDressingBar = false;
+}
+
+// Each selection or menu-item swap is dressed synchronously inside the same transaction so app focus
+// switches never flash an unstyled Apple logo or un-embossed titles waiting on the 0.25s poll timer.
 static void BarLayerGainedSublayer(CALayer *layer, CALayer *sublayer) {
+    if (gDressingBar) return;
     id delegate = layer.delegate;
-    if (!delegate || !(IsNamed(delegate, "AppMenuItem") || IsNamed(delegate, "SceneHostDisplayItemContainerView"))) return;
-    // Possibly not sized yet, in which case the blue takes its width when it is.
-    if (sublayer.bounds.size.width > 0 ? !LooksLikeBarSelection(sublayer) : (sublayer.delegate || [sublayer.name hasPrefix:@"lioness."] || strstr(object_getClassName(sublayer), "Scene") || strstr(object_getClassName(sublayer), "BackingLayerContents"))) return;
+    if (!delegate) return;
+    if ([sublayer.name hasPrefix:@"lioness."]) return;
+    if (IsNamed(delegate, "MenuBarHitTestingView") || IsNamed(delegate, "AppMenuItemContainerView")) {
+        DressMenuBarWindowImmediate([delegate window]);
+        return;
+    }
+    if (!(IsNamed(delegate, "AppMenuItem") || IsNamed(delegate, "SceneHostDisplayItemContainerView"))) return;
     NSWindow *window = [delegate window];
+    // Selection pill or menu item content update.
+    if (sublayer.bounds.size.width > 0 ? !LooksLikeBarSelection(sublayer) : (sublayer.delegate || strstr(object_getClassName(sublayer), "Scene") || strstr(object_getClassName(sublayer), "BackingLayerContents"))) {
+        if (IsNamed(delegate, "AppMenuItem")) DressMenuBarWindowImmediate(window);
+        return;
+    }
     NSView *frame = window.contentView.superview;
     if (!frame.layer) return;
+    gDressingBar = true;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     DressBarSelection(sublayer, frame.layer, window.frame.size.height, ScaleOf(@{}, window.backingScaleFactor));
     [CATransaction commit];
+    gDressingBar = false;
     DressMenuBars();
 }
 static void (*gOrigBarAddSublayer)(CALayer *, SEL, CALayer *);
@@ -2799,6 +2821,26 @@ static void (*gOrigBarInsertSublayer)(CALayer *, SEL, CALayer *, unsigned);
 static void HookBarInsertSublayer(CALayer *self, SEL _cmd, CALayer *sublayer, unsigned index) {
     gOrigBarInsertSublayer(self, _cmd, sublayer, index);
     BarLayerGainedSublayer(self, sublayer);
+}
+static void (*gOrigBarSetSublayers)(CALayer *, SEL, NSArray<CALayer *> *);
+static void HookBarSetSublayers(CALayer *self, SEL _cmd, NSArray<CALayer *> *sublayers) {
+    gOrigBarSetSublayers(self, _cmd, sublayers);
+    if (!gDressingBar) {
+        id delegate = self.delegate;
+        if (delegate && (IsNamed(delegate, "MenuBarHitTestingView") || IsNamed(delegate, "AppMenuItem"))) {
+            DressMenuBarWindowImmediate([delegate window]);
+        }
+    }
+}
+static void (*gOrigBarLayerDisplay)(CALayer *, SEL);
+static void HookBarLayerDisplay(CALayer *self, SEL _cmd) {
+    gOrigBarLayerDisplay(self, _cmd);
+    if (!gDressingBar) {
+        id delegate = self.delegate;
+        if (delegate && IsNamed(delegate, "AppMenuItemView")) {
+            DressMenuBarWindowImmediate([delegate window]);
+        }
+    }
 }
 
 // Match the status item window's appearance so MenuBarAgent's inversion logic stays consistent on both light and dark wallpapers.
@@ -2874,6 +2916,8 @@ static void InstallMenuBar(void) {
     Override("CALayer", @selector(removeFromSuperlayer), (IMP)HookLayerRemove, &gOrigLayerRemove);
     Override("NSViewBackingLayer", @selector(addSublayer:), (IMP)HookBarAddSublayer, &gOrigBarAddSublayer);
     Override("NSViewBackingLayer", @selector(insertSublayer:atIndex:), (IMP)HookBarInsertSublayer, &gOrigBarInsertSublayer);
+    Override("NSViewBackingLayer", @selector(setSublayers:), (IMP)HookBarSetSublayers, &gOrigBarSetSublayers);
+    Override("NSViewBackingLayer", @selector(display), (IMP)HookBarLayerDisplay, &gOrigBarLayerDisplay);
     // The agent's windows come and go with Spaces and displays, and say nothing to AppKit that could be hooked.
     static dispatch_source_t timer;
     timer = MainQueueTimer(0.25, ^{ DressMenuBars(); [CATransaction flush]; });

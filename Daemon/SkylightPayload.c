@@ -356,12 +356,31 @@ static void EnsureInitialized(WSRemoteState *st) {
     }
 }
 
+// Opens an outer CATransaction BEFORE orig_update_layers / orig_reshape_layers runs so that
+// WindowServer's internal WSCAContextScopeTransaction::~D1 only pops an inner transaction —
+// preventing a 1-frame flash of unstyled Solarium/QFA layers on app focus switch!
+WS_PAYLOAD_FN __attribute__((visibility("hidden")))
+int LionessPreStyle(void) {
+    WSRemoteState *st = GetState();
+    if (!st || st->magic != WS_STATE_MAGIC || !st->enabled || !st->initialized) return 0;
+    if (!st->cls_CATransaction || !st->sel_begin) return 0;
+    Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_begin);
+    if (st->sel_setDisableActions)
+        Call3(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_setDisableActions, 1);
+    return 1;
+}
+
 // Re-usable helper: applies Mountain Lion translucent blurred backdrop + SArtFile.bin gloss + shadow
 // to either SolariumMenuBarContext (isQfa=0) or LiveActivitiesQFAMenuBarContext (isQfa=1).
+// If `hadOuterTxn` is non-zero, closes the outer CATransaction opened by LionessPreStyle() atomically.
 WS_PAYLOAD_FN __attribute__((visibility("hidden")))
-void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa) {
+void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa, int hadOuterTxn) {
     WSRemoteState *st = GetState();
-    if (!st || st->magic != WS_STATE_MAGIC || !st->enabled || !ctx) return;
+    if (!st || st->magic != WS_STATE_MAGIC || !st->enabled || !ctx) {
+        if (hadOuterTxn && st && st->cls_CATransaction && st->sel_commit)
+            Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
+        return;
+    }
 
     if (isQfa) {
         if (fromReshape) st->qfaReshapeCount++;
@@ -373,17 +392,27 @@ void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa
 
     int needsRefresh = (st->initialized && st->appliedGen != st->configGen);
     EnsureInitialized(st);
-    if (!st->cls_CATransaction || !st->cls_CALayer) return;
+    if (!st->cls_CATransaction || !st->cls_CALayer) {
+        if (hadOuterTxn && st->cls_CATransaction && st->sel_commit)
+            Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
+        return;
+    }
 
     const WSContextOffsets *off = isQfa ? &st->qfaOffsets : &st->solOffsets;
-    if (!off->off_root) return;
+    if (!off->off_root) {
+        if (hadOuterTxn) Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
+        return;
+    }
 
     void *root       = *(void **)((char *)ctx + off->off_root);
     void *backstopFS = off->off_backstop_fs     ? *(void **)((char *)ctx + off->off_backstop_fs)     : NULL;
     void *backstopAX = off->off_backstop_ax     ? *(void **)((char *)ctx + off->off_backstop_ax)     : NULL;
     void *desktopCap = off->off_desktop_capture ? *(void **)((char *)ctx + off->off_desktop_capture) : NULL;
     void *desktopEnh = off->off_desktop_enh     ? *(void **)((char *)ctx + off->off_desktop_enh)     : NULL;
-    if (!root) return;
+    if (!root) {
+        if (hadOuterTxn) Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
+        return;
+    }
 
     // Detect fullscreen black backstop: don't paint light translucent bar over fullscreen black space.
     int isFullScreen = 0;
@@ -396,14 +425,19 @@ void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa
     WSRect bounds = CallRetRect(st->fn_objc_msgSend, (uint64_t)root, (uint64_t)st->sel_bounds);
     st->lastW = (uint32_t)(bounds.w > 0.0 ? bounds.w : 0.0);
     st->lastH = (uint32_t)(bounds.h > 0.0 ? bounds.h : 0.0);
-    if (bounds.w < 1.0 || bounds.h < 1.0) return;
+    if (bounds.w < 1.0 || bounds.h < 1.0) {
+        if (hadOuterTxn) Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
+        return;
+    }
 
     uint32_t flipped = st->sel_isGeometryFlipped
         ? (uint32_t)((uint64_t)Call2(st->fn_objc_msgSend, (uint64_t)root, (uint64_t)st->sel_isGeometryFlipped) & 1)
         : 0;
 
-    Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_begin);
-    Call3(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_setDisableActions, 1);
+    if (!hadOuterTxn) {
+        Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_begin);
+        Call3(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_setDisableActions, 1);
+    }
     // Register menubar.root's CAContext with CATransaction just like WSCAContextScopeTransaction::~D1
     // so our layer mutations commit to WindowServer's compositor on this exact frame.
     void *caCtx = st->sel_context ? Call2(st->fn_objc_msgSend, (uint64_t)root, (uint64_t)st->sel_context) : NULL;
@@ -591,25 +625,37 @@ void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa
 }
 
 // Helper macro for update_layers wrappers (Solarium = 0, LiveActivitiesQFA = 1).
+// Saves x0..x7 across LionessPreStyle() so orig_update_layers receives exact unmodified register + stack args
+// inside our outer CATransaction (zero intermediate frame flicker on app focus switch!).
 #define DEFINE_UPDATE_ENTRY(NAME, ORIG_FIELD, IS_QFA) \
 WS_PAYLOAD_FN __attribute__((naked)) \
 void NAME(void) { \
     __asm__ volatile( \
         "pacibsp\n" \
-        "sub sp, sp, #0x70\n" \
+        "sub sp, sp, #0xc0\n" \
         "stp x19, x20, [sp, #0x40]\n" \
-        "str x21, [sp, #0x50]\n" \
-        "stp x29, x30, [sp, #0x60]\n" \
-        "add x29, sp, #0x60\n" \
+        "stp x21, x22, [sp, #0x50]\n" \
+        "stp x0,  x1,  [sp, #0x60]\n" \
+        "stp x2,  x3,  [sp, #0x70]\n" \
+        "stp x4,  x5,  [sp, #0x80]\n" \
+        "stp x6,  x7,  [sp, #0x90]\n" \
+        "stp x29, x30, [sp, #0xb0]\n" \
+        "add x29, sp, #0xb0\n" \
         "mov x19, x0\n" \
         "mov x20, x3\n" \
-        "ldp x9,  x10, [sp, #0x70]\n" \
+        "bl _LionessPreStyle\n" \
+        "mov x22, x0\n" \
+        "ldp x0,  x1,  [sp, #0x60]\n" \
+        "ldp x2,  x3,  [sp, #0x70]\n" \
+        "ldp x4,  x5,  [sp, #0x80]\n" \
+        "ldp x6,  x7,  [sp, #0x90]\n" \
+        "ldp x9,  x10, [sp, #0xc0]\n" \
         "stp x9,  x10, [sp, #0x00]\n" \
-        "ldp x11, x12, [sp, #0x80]\n" \
+        "ldp x11, x12, [sp, #0xd0]\n" \
         "stp x11, x12, [sp, #0x10]\n" \
-        "ldp x13, x14, [sp, #0x90]\n" \
+        "ldp x13, x14, [sp, #0xe0]\n" \
         "stp x13, x14, [sp, #0x20]\n" \
-        "ldp x15, x17, [sp, #0xa0]\n" \
+        "ldp x15, x17, [sp, #0xf0]\n" \
         "stp x15, x17, [sp, #0x30]\n" \
         "adr x21, .\n" \
         "and x21, x21, #-16384\n" \
@@ -620,11 +666,12 @@ void NAME(void) { \
         "mov x1, x20\n" \
         "mov w2, #0\n" \
         "mov w3, %[is_qfa]\n" \
+        "mov w4, w22\n" \
         "bl _LionessStyleMenuBar\n" \
-        "ldp x29, x30, [sp, #0x60]\n" \
-        "ldr x21, [sp, #0x50]\n" \
+        "ldp x29, x30, [sp, #0xb0]\n" \
+        "ldp x21, x22, [sp, #0x50]\n" \
         "ldp x19, x20, [sp, #0x40]\n" \
-        "add sp, sp, #0x70\n" \
+        "add sp, sp, #0xc0\n" \
         "retab\n" \
         : \
         : [off_orig] "i"(offsetof(WSRemoteState, ORIG_FIELD)), [is_qfa] "i"(IS_QFA) \
@@ -636,11 +683,24 @@ WS_PAYLOAD_FN __attribute__((naked)) \
 void NAME(void) { \
     __asm__ volatile( \
         "pacibsp\n" \
-        "sub sp, sp, #0x30\n" \
-        "stp x19, x20, [sp, #0x10]\n" \
-        "stp x29, x30, [sp, #0x20]\n" \
-        "add x29, sp, #0x20\n" \
+        "sub sp, sp, #0x80\n" \
+        "stp x0,  x1,  [sp, #0x00]\n" \
+        "stp x2,  x3,  [sp, #0x10]\n" \
+        "stp d0,  d1,  [sp, #0x20]\n" \
+        "stp d2,  d3,  [sp, #0x30]\n" \
+        "stp d4,  d5,  [sp, #0x40]\n" \
+        "stp x19, x20, [sp, #0x50]\n" \
+        "str x21,      [sp, #0x60]\n" \
+        "stp x29, x30, [sp, #0x70]\n" \
+        "add x29, sp, #0x70\n" \
         "mov x19, x0\n" \
+        "bl _LionessPreStyle\n" \
+        "mov x21, x0\n" \
+        "ldp x0,  x1,  [sp, #0x00]\n" \
+        "ldp x2,  x3,  [sp, #0x10]\n" \
+        "ldp d0,  d1,  [sp, #0x20]\n" \
+        "ldp d2,  d3,  [sp, #0x30]\n" \
+        "ldp d4,  d5,  [sp, #0x40]\n" \
         "adr x20, .\n" \
         "and x20, x20, #-16384\n" \
         "add x20, x20, #0x4000\n" \
@@ -650,10 +710,12 @@ void NAME(void) { \
         "mov x1, #0\n" \
         "mov w2, #1\n" \
         "mov w3, %[is_qfa]\n" \
+        "mov w4, w21\n" \
         "bl _LionessStyleMenuBar\n" \
-        "ldp x29, x30, [sp, #0x20]\n" \
-        "ldp x19, x20, [sp, #0x10]\n" \
-        "add sp, sp, #0x30\n" \
+        "ldp x29, x30, [sp, #0x70]\n" \
+        "ldr x21,      [sp, #0x60]\n" \
+        "ldp x19, x20, [sp, #0x50]\n" \
+        "add sp, sp, #0x80\n" \
         "retab\n" \
         : \
         : [off_orig] "i"(offsetof(WSRemoteState, ORIG_FIELD)), [is_qfa] "i"(IS_QFA) \
