@@ -142,30 +142,66 @@ static void RegisterUIFonts(void) {
     gHaveUIFonts = registered == 2;
 }
 
-static CTFontRef (*gOrigFontCreate)(CTFontDescriptorRef, CGFloat, const CGAffineTransform *);
-
-// Below NSFont, so AppKit still believes it has the system font and control sizes keep working.
-static CTFontRef HookFontCreate(CTFontDescriptorRef descriptor, CGFloat size, const CGAffineTransform *matrix) {
+static CTFontDescriptorRef LucidaDescriptorIfSystem(CTFontDescriptorRef descriptor) {
     CFDictionaryRef dictionary = CTFontDescriptorCopyAttributes(descriptor);
+    if (!dictionary) return NULL;
     NSString *fontName = CFDictionaryGetValue(dictionary, (__bridge CFStringRef)NSFontNameAttribute);
     NSString *uiAttr = CFDictionaryGetValue(dictionary, CFSTR("NSCTFontUIUsageAttribute"));
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
     CTFontDescriptorRef lucida = NULL;
     if (uiAttr || !fontName || ([fontName containsString:@"AppleSystemUIFont"] && !([bundleID containsString:@"Passwords"] || [bundleID containsString:@"Safari"]))) {
         NSMutableDictionary *attributes = [(__bridge NSDictionary *)dictionary mutableCopy];
+        NSDictionary *traits = attributes[(__bridge NSString *)kCTFontTraitsAttribute];
+        uint32_t sym = [traits[(__bridge NSString *)kCTFontSymbolicTrait] unsignedIntValue];
+        double weight = [traits[(__bridge NSString *)kCTFontWeightTrait] doubleValue];
         [attributes removeObjectForKey:@"NSCTFontTraitsAttribute"];
         [attributes removeObjectForKey:@"NSCTFontUIUsageAttribute"];
-        bool bold = [fontName containsString:@"Bold"];
+        bool bold = (sym & kCTFontTraitBold) != 0 || weight >= 0.23
+            || [fontName containsString:@"Bold"] || [fontName containsString:@"Demi"]
+            || [fontName containsString:@"Heavy"] || [fontName containsString:@"Black"]
+            || [uiAttr containsString:@"Bold"] || [uiAttr containsString:@"Emphasized"]
+            || [uiAttr containsString:@"Demi"] || [uiAttr containsString:@"Heavy"]
+            || [uiAttr containsString:@"Black"] || [uiAttr containsString:@"Headline"];
         attributes[NSFontNameAttribute] = gHaveUIFonts ? (bold ? @"LLucidaGrandeUI-Bold" : @"LLucidaGrandeUI") : (bold ? @"LucidaGrande-Bold" : @"LucidaGrande");
         lucida = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attributes);
     }
     CFRelease(dictionary);
+    return lucida;
+}
+
+static CTFontRef (*gOrigFontCreate)(CTFontDescriptorRef, CGFloat, const CGAffineTransform *);
+static CTFontRef (*gOrigFontCreateOpts)(CTFontDescriptorRef, CGFloat, const CGAffineTransform *, CTFontOptions);
+
+// Below NSFont, so AppKit still believes it has the system font and control sizes keep working.
+static CTFontRef HookFontCreate(CTFontDescriptorRef descriptor, CGFloat size, const CGAffineTransform *matrix) {
+    CTFontDescriptorRef lucida = LucidaDescriptorIfSystem(descriptor);
     CTFontRef font = gOrigFontCreate(lucida ?: descriptor, size, matrix);
     if (lucida) CFRelease(lucida);
     // A nil here reaches AppKit as a nil NSFont, and the menu bar's layout throws over it, ending the app.
     font = font ?: gOrigFontCreate(descriptor, size, matrix);
     // Never nil: AppKit's menu bar titles put this in a dictionary, and the exception ends the app.
     return font ?: CTFontCreateWithName(CFSTR("LucidaGrande"), size > 0 ? size : 13, matrix);
+}
+
+static CTFontRef HookFontCreateOpts(CTFontDescriptorRef descriptor, CGFloat size, const CGAffineTransform *matrix, CTFontOptions options) {
+    CTFontDescriptorRef lucida = LucidaDescriptorIfSystem(descriptor);
+    CTFontRef font = gOrigFontCreateOpts(lucida ?: descriptor, size, matrix, options);
+    if (lucida) CFRelease(lucida);
+    font = font ?: gOrigFontCreateOpts(descriptor, size, matrix, options);
+    return font ?: CTFontCreateWithName(CFSTR("LucidaGrande"), size > 0 ? size : 13, matrix);
+}
+
+// MenuBarAgent caches +[NSFont menuBarFontOfSize:] before Ammonia injects this dylib; bypass the stale cache.
+static NSFont *(*gOrigMenuBarFont)(id, SEL, CGFloat);
+static NSFont *HookMenuBarFont(id self, SEL _cmd, CGFloat size) {
+    NSFont *font = gOrigMenuBarFont(self, _cmd, size);
+    if (font) {
+        NSString *ps = CFBridgingRelease(CTFontCopyPostScriptName((__bridge CTFontRef)font));
+        if ([ps containsString:@"LucidaGrande"]) return font;
+    }
+    CGFloat pt = size > 0 ? size : (font.pointSize > 0 ? font.pointSize : 14.0);
+    NSString *name = gHaveUIFonts ? @"LLucidaGrandeUI" : @"LucidaGrande";
+    return [NSFont fontWithName:name size:pt] ?: [NSFont fontWithName:@"LucidaGrande" size:pt] ?: font;
 }
 
 static bool FlagTrue(void) { return true; }
@@ -201,6 +237,14 @@ __attribute__((constructor)) static void LionLayoutInit(void) {
     static void *original[16];
     int n = 0;
     HookSymbol(NULL, "CTFontCreateWithFontDescriptor", (void *)HookFontCreate, (void **)&gOrigFontCreate);
+    HookSymbol(NULL, "CTFontCreateWithFontDescriptorAndOptions", (void *)HookFontCreateOpts, (void **)&gOrigFontCreateOpts);
+    Method mbFont = class_getClassMethod(NSFont.class, @selector(menuBarFontOfSize:));
+    if (mbFont) gOrigMenuBarFont = (NSFont *(*)(id, SEL, CGFloat))method_setImplementation(mbFont, (IMP)HookMenuBarFont);
+    if (!strcmp(getprogname(), "MenuBarAgent")) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSNotificationCenter.defaultCenter postNotificationName:@"NSMenuFontSizeDidChangeNotification" object:nil];
+        });
+    }
     HookSymbol("AppKit", "_NSToolbarItemViewerCompatabilitySelectionWidgetDefaultValueFunction", (void *)FlagTrue, &original[n++]);
     HookSymbol("AppKit", "_NSBoxUseLegacyMetricsDefaultValueFunction", (void *)FlagTrue, &original[n++]);
     HookSymbol("AppKit", "_NSCellUseLegacyFontSizeDefaultValueFunction", (void *)FlagTrue, &original[n++]);
@@ -409,7 +453,21 @@ hook(NSWindow)
         || [bundleIdentifier isEqualToString:@"com.apple.AddressBook"]) {
         style &= ~NSWindowStyleMaskFullSizeContentView;
     }
+    if ([[(NSWindow*)self className] containsString:@"AlertPanel"]) {
+        style &= ~(1ULL << 33);   // macOS 27 glass window styleMask bit
+    }
     return ZKOrig(id, contentRect, style, backingStoreType, flag);
+}
+
+- (NSWindowStyleMask)styleMask {
+    NSWindowStyleMask mask = ZKOrig(NSWindowStyleMask);
+    if ([[(NSWindow*)self className] containsString:@"AlertPanel"]) mask &= ~(1ULL << 33);
+    return mask;
+}
+
+- (void)setStyleMask:(NSWindowStyleMask)style {
+    if ([[(NSWindow*)self className] containsString:@"AlertPanel"]) style &= ~(1ULL << 33);
+    ZKOrig(void, style);
 }
 
 -(void)setToolbarStyle:(NSWindowToolbarStyle)style {
@@ -472,6 +530,27 @@ hook(NSWindow)
 
 -(bool)_zoomButtonIsFullScreenButton {
     return false;
+}
+endhook
+
+hook(_NSAlertPanel)
+- (NSWindowStyleMask)styleMask {
+    return ZKOrig(NSWindowStyleMask) & ~(1ULL << 33);
+}
+- (void)setStyleMask:(NSWindowStyleMask)style {
+    ZKOrig(void, style & ~(1ULL << 33));
+}
+- (BOOL)isOpaque {
+    return YES;
+}
+- (void)setOpaque:(BOOL)opaque {
+    ZKOrig(void, YES);
+}
+- (NSColor *)backgroundColor {
+    return [NSColor colorWithSRGBRed:0.929 green:0.929 blue:0.929 alpha:1];
+}
+- (void)setBackgroundColor:(NSColor *)color {
+    ZKOrig(void, [NSColor colorWithSRGBRed:0.929 green:0.929 blue:0.929 alpha:1]);
 }
 endhook
 

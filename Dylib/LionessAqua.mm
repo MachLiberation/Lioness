@@ -17,9 +17,11 @@
 #include "../Client/LionessClient.h"
 #include <dobby.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <objc/message.h>
 #include <objc/Runtime.h>
 #include <os/log.h>
+#include <ptrauth.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -176,7 +178,7 @@ static bool ArtBehindIsDark(NSView *view) { return view && [objc_getAssociatedOb
 
 // Widgets with no counterpart in Lion, where Lion's answer is that the layer is empty.
 static bool IsEmptyInLion(NSString *widget) {
-    return [widget isEqual:@"kCUIWidgetVisualEffectView"] || [widget isEqual:@"kCUIWidgetWindowTitleBarSeparator"];
+    return [widget isEqual:@"kCUIWidgetWindowTitleBarSeparator"];
 }
 
 // The options do not say whether a push button is the default one, so that comes from the view.
@@ -260,8 +262,10 @@ static void UpdateTitlebarLine(NSView *view);
 
 // Lion's bar art is 22 points high and speckled. Stretching it for a toolbar would smear the speckle into streaks, or lose it. So it is pulled apart: each row's
 // average is the gradient, which stretches to the bar's height, and what is left over in a block of the art is the speckle, which tiles at its own size.
-// Wide enough for any window, shared between windows, and anchored rather than scaled.
-static constexpr uint32_t kBarWidthPoints = 2500;
+// Built as one 64-point tile and repeated horizontally across the bar, so it covers any width without stretching.
+static constexpr uint32_t kBarTilePoints = 64;
+static NSString *const kTitlebarFillName = @"lioness.titlebarFill";
+static NSString *const kTitlebarLineName = @"lioness.titlebarLine";
 static CGImageRef CreateSpeckledBar(CGImageRef art, uint32_t artPoints, uint32_t artHeight, uint32_t height, uint32_t scale) {
     size_t artWidth = CGImageGetWidth(art), artRows = CGImageGetHeight(art);
     uint8_t *source = (uint8_t *)malloc(artWidth * artRows * 4);
@@ -270,8 +274,8 @@ static CGImageRef CreateSpeckledBar(CGImageRef art, uint32_t artPoints, uint32_t
     CGContextRef in = CGBitmapContextCreate(source, artWidth, artRows, 8, artWidth * 4, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
     CGContextDrawImage(in, CGRectMake(0, 0, artWidth, artRows), art);   // row 0 of this memory is the art's top
     CGContextRelease(in);
-    size_t rows = artHeight * scale, firstRow = LIONESS_PADDING * scale, tile = 64 * scale, firstColumn = (artWidth - tile) / 2;
-    size_t width = kBarWidthPoints * scale, high = height * scale;
+    size_t rows = artHeight * scale, firstRow = LIONESS_PADDING * scale, tile = kBarTilePoints * scale, firstColumn = (artWidth - tile) / 2;
+    size_t width = tile, high = height * scale;
     uint8_t *out = (uint8_t *)malloc(width * high * 4);
     float *mean = (float *)calloc(rows * 3, sizeof(float));
     if (!out || !mean) { free(source); free(out); free(mean); CGColorSpaceRelease(space); return NULL; }
@@ -284,8 +288,7 @@ static CGImageRef CreateSpeckledBar(CGImageRef art, uint32_t artPoints, uint32_t
         float mix = at - low;
         size_t tileRow = y % rows;
         for (size_t x = 0; x < width; x++) {
-            size_t tileColumn = x % tile;
-            const uint8_t *p = source + ((firstRow + tileRow) * artWidth + firstColumn + tileColumn) * 4;
+            const uint8_t *p = source + ((firstRow + tileRow) * artWidth + firstColumn + x) * 4;
             uint8_t *q = out + (y * width + x) * 4;
             for (int c = 0; c < 3; c++) {
                 float gradient = mean[low * 3 + c] * (1 - mix) + mean[up * 3 + c] * mix;
@@ -321,7 +324,11 @@ static void UpdateTitlebarBackground(NSView *view) {
     CALayer *layer = view.layer;
     NSWindow *window = view.window;
     if (!layer || !window) return;
-    if (window.titlebarAppearsTransparent) { layer.contents = nil; return; }   // the app draws there itself
+    if (window.titlebarAppearsTransparent) {
+        layer.contents = nil;
+        for (CALayer *sub in layer.sublayers) if ([sub.name isEqual:kTitlebarFillName]) sub.hidden = YES;
+        return;
+    }   // the app draws there itself
     LionessRequest r = {};
     r.kind = LionessWindowFrame;
     r.state = gForceActive || window.isKeyWindow || window.isMainWindow ? LionessStateActive : LionessStateInactive;
@@ -330,8 +337,9 @@ static void UpdateTitlebarBackground(NSView *view) {
     r.scale = ScaleOf(@{}, window.backingScaleFactor);
     CGImageRef bar = LionessCopyCachedImage(&r, NULL);
     if (!bar) return;
-    uint32_t height = (uint32_t)ceil(layer.bounds.size.height);
-    if (!height || height > 400) return;
+    CGRect bounds = layer.bounds;
+    uint32_t height = (uint32_t)ceil(bounds.size.height);
+    if (!height || height > 400 || bounds.size.width < 1) return;
     static NSMutableDictionary *bars = [NSMutableDictionary new];
     NSString *key = [NSString stringWithFormat:@"%u %u %u", height, r.scale, r.state];
     id contents = bars[key];
@@ -342,16 +350,36 @@ static void UpdateTitlebarBackground(NSView *view) {
         bars[key] = contents;
         CGImageRelease(built);
     }
-    for (CALayer *sub in layer.sublayers) sub.hidden = YES;   // the NSVisualEffectView
+    CAReplicatorLayer *fill = nil;
+    for (CALayer *sub in layer.sublayers) {
+        if ([sub.name isEqual:kTitlebarFillName] && [sub isKindOfClass:CAReplicatorLayer.class]) fill = (CAReplicatorLayer *)sub;
+        else if (![sub.name isEqual:kTitlebarLineName]) sub.hidden = YES;   // the NSVisualEffectView
+    }
     // NSTitlebarView has a live blur of its own, beside this view, for content scrolling under the bar.
     for (CALayer *sub in layer.superlayer.sublayers) if ([NSStringFromClass(sub.class) containsString:@"Backdrop"]) sub.hidden = YES;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    layer.contents = contents;
-    layer.contentsScale = r.scale;
-    layer.contentsGravity = kCAGravityTopLeft;
-    layer.contentsCenter = CGRectMake(0, 0, 1, 1);
-    layer.contentsRect = CGRectMake(0, 0, 1, 1);
+    if (!fill) {
+        fill = [CAReplicatorLayer layer];
+        fill.name = kTitlebarFillName;
+        fill.masksToBounds = YES;
+        CALayer *tile = [CALayer layer];
+        [fill addSublayer:tile];
+        [layer insertSublayer:fill atIndex:0];
+    }
+    fill.hidden = NO;
+    fill.geometryFlipped = layer.geometryFlipped;
+    fill.frame = bounds;
+    fill.instanceCount = (NSInteger)ceil(bounds.size.width / (CGFloat)kBarTilePoints);
+    fill.instanceTransform = CATransform3DMakeTranslation(kBarTilePoints, 0, 0);
+    CALayer *tile = fill.sublayers.firstObject;
+    tile.frame = CGRectMake(0, 0, kBarTilePoints, bounds.size.height);
+    tile.contents = contents;
+    tile.contentsScale = r.scale;
+    tile.contentsGravity = kCAGravityTopLeft;
+    tile.contentsCenter = CGRectMake(0, 0, 1, 1);
+    tile.contentsRect = CGRectMake(0, 0, 1, 1);
+    layer.contents = nil;
     layer.backgroundColor = NULL;
     layer.masksToBounds = YES;
     [CATransaction commit];
@@ -437,7 +465,6 @@ static void PaintSidebarDivider(CALayer *layer, bool rightToLeft) {
 
 // A full-width line along the foot of the title bar, beneath the sidebar as well. NSTitlebarSeparatorView only spans the content, and
 // stretching the bar's art blurs the one that is in it.
-static NSString *const kTitlebarLineName = @"lioness.titlebarLine";
 static void UpdateTitlebarLine(NSView *view) {
     CALayer *layer = view.layer;
     NSWindow *window = view.window;
@@ -573,11 +600,12 @@ static void UpdateFieldBezel(NSView *field) {
     NSRect frame = field.frame;
     if (frame.size.width < 40 || frame.size.height < 10) return;
     bool active = WindowIsActive(window);
+    NSString *widget = [field isKindOfClass:NSTokenField.class] ? @"textfieldround" : @"textfield";
     uint32_t scale = ScaleOf(@{}, window.backingScaleFactor), width = (uint32_t)ceil(frame.size.width), height = (uint32_t)ceil(frame.size.height);
     CALayer *bezel = objc_getAssociatedObject(field, kFieldBezelKey);
-    NSString *drawn = [NSString stringWithFormat:@"%u %u %u %d", width, height, scale, active];
+    NSString *drawn = [NSString stringWithFormat:@"%@ %u %u %u %d", widget, width, height, scale, active];
     if (![bezel.name isEqual:drawn]) {
-        NSDictionary *o = @{ @"widget": @"textfieldround", @"state": active ? @"normal" : @"inactive", @"size": @"regular",
+        NSDictionary *o = @{ @"widget": widget, @"state": active ? @"normal" : @"inactive", @"size": @"regular",
                              @"kCUIPresentationStateKey": active ? @"kCUIPresentationStateActiveKey" : @"kCUIPresentationStateInactive" };
         CGImageRef lion = LionessCopyDrawnImage((__bridge CFDictionaryRef)o, width, height, scale);
         if (!lion) return;
@@ -664,35 +692,93 @@ static void AnimateFrames(CALayer *layer, NSDictionary *options, uint32_t width,
 // sidebar. AppKit asks CoreUI for these on an inner layer of no size that it never sizes, so the view's own layer takes the
 // picture. The selection's blue is the art called FinderSideBar; the art called SideBarSelection is only its grey form, which
 // is also what FinderSideBar gives when inactive. Rounded selection masks are modern: Lion's runs edge to edge.
+static void PaintMenuArtOrSolid(NSView *view, NSColor *fallback) {
+    CALayer *layer = view.layer;
+    uint32_t scale = ScaleOf(@{}, view.window.backingScaleFactor);
+    CGImageRef lion = LionessCopyDrawnImage((__bridge CFDictionaryRef)@{ @"widget": @"kCUIWidgetMenu", @"state": @"normal" }, 64, 64, scale);
+    if (lion) {
+        CGImageRef contents = CreateLayerContents(lion, CGSizeMake(64, 64), scale);
+        CGImageRelease(lion);
+        if (contents) {
+            SetContents(layer, contents, scale, CGRectMake(0.49, 0.49, 0.02, 0.02));
+            CGImageRelease(contents);
+            return;
+        }
+    }
+    layer.contents = nil;
+    layer.backgroundColor = fallback.CGColor;
+}
+
+static bool UsesLinenCards(NSWindow *window);
+static bool IsInSidebar(NSView *view);
 static const void *const kMaterialKey = &kMaterialKey;
 static void UpdateMaterial(NSVisualEffectView *view) {
     NSWindow *window = view.window;
     if (!window) return;
-    bool selection = view.material == NSVisualEffectMaterialSelection;
-    if (!selection && view.material != NSVisualEffectMaterialSidebar) {
-        // Every other material is a modern live surface, with Lion's plain window behind it. Not in a see-through window, where it may be all there is, nor the ones
-        // that are meant to be dark glass in Lion too.
-        NSVisualEffectMaterial material = view.material;
-        if (!window.isOpaque || strstr(object_getClassName(window), "Menu") || material == NSVisualEffectMaterialHUDWindow || material == NSVisualEffectMaterialFullScreenUI || material == NSVisualEffectMaterialToolTip) return;
+    static Class rootMenuBg = objc_getClass("NSRootMenuWindowBackgroundView");
+    static Class wmMenuBg = objc_getClass("NSMenuWindowManagerBackgroundView");
+    static Class sheetDim = objc_getClass("NSSheetEffectDimmingMaskingView");
+    if ((rootMenuBg && [view isKindOfClass:rootMenuBg]) ||
+        (wmMenuBg && [view isKindOfClass:wmMenuBg]) ||
+        (sheetDim && [view isKindOfClass:sheetDim])) return;
+
+    // Inside Control Center / opened Notification Center linen cards, hover & highlight visual effect views
+    // should subtly dim the linen underneath rather than painting an opaque dark/light box over it.
+    if (UsesLinenCards(window)) {
         view.wantsLayer = YES;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         for (CALayer *sub in view.layer.sublayers) if (![sub.delegate isKindOfClass:NSView.class]) sub.hidden = YES;
         view.layer.contents = nil;
-        view.layer.backgroundColor = NULL;
-        view.layer.cornerRadius = 0;
-        view.layer.mask = nil;
+        view.layer.backgroundColor = [NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:0.24].CGColor;
         [CATransaction commit];
-        if (view.maskImage) view.maskImage = nil;
         return;
     }
-    bool active = gForceActive || window.isKeyWindow || window.isMainWindow;
+
+    bool selection = view.material == NSVisualEffectMaterialSelection;
+    if (!selection && view.material != NSVisualEffectMaterialSidebar) {
+        NSVisualEffectMaterial material = view.material;
+        static Class popoverFrame = objc_getClass("NSPopoverFrame");
+        bool isPopover = (popoverFrame && [view isKindOfClass:popoverFrame]) ||
+                         material == NSVisualEffectMaterialPopover ||
+                         material == NSVisualEffectMaterialMenu;
+        view.wantsLayer = YES;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (CALayer *sub in view.layer.sublayers) if (![sub.delegate isKindOfClass:NSView.class]) sub.hidden = YES;
+
+        if (isPopover) {
+            PaintMenuArtOrSolid(view, [NSColor colorWithSRGBRed:0.96 green:0.96 blue:0.96 alpha:1]);
+        } else if (material == NSVisualEffectMaterialHUDWindow || material == NSVisualEffectMaterialFullScreenUI) {
+            view.layer.contents = nil;
+            view.layer.backgroundColor = [NSColor colorWithSRGBRed:0.110 green:0.110 blue:0.110 alpha:0.90].CGColor;
+        } else if (material == NSVisualEffectMaterialToolTip) {
+            view.layer.contents = nil;
+            view.layer.backgroundColor = [NSColor colorWithSRGBRed:0.996 green:0.988 blue:0.835 alpha:1.0].CGColor;
+        } else if (material == NSVisualEffectMaterialSheet || !window.isOpaque) {
+            bool dark = [view.effectiveAppearance.name containsString:@"Dark"];
+            view.layer.contents = nil;
+            view.layer.backgroundColor = (dark
+                ? [NSColor colorWithSRGBRed:0.110 green:0.110 blue:0.110 alpha:0.90]
+                : [NSColor colorWithSRGBRed:0.929 green:0.929 blue:0.929 alpha:1.0]).CGColor;
+        } else {
+            view.layer.contents = nil;
+            view.layer.backgroundColor = NULL;
+            view.layer.cornerRadius = 0;
+            view.layer.mask = nil;
+            if (view.maskImage) view.maskImage = nil;
+        }
+        [CATransaction commit];
+        return;
+    }
+    bool active = WindowIsActive(window);
     if (selection) {
         NSView *parent = view.superview;
-        if ([parent isKindOfClass:NSTableRowView.class]) active = gForceActive || ((NSTableRowView *)parent).emphasized;
+        if ([parent isKindOfClass:NSTableRowView.class] && !IsInSidebar(parent)) active = gForceActive || ((NSTableRowView *)parent).emphasized;
     }
     uint32_t scale = ScaleOf(@{}, window.backingScaleFactor);
     NSString *drawn = [NSString stringWithFormat:@"%d %d %u", selection, active, scale];
+    for (CALayer *sub in view.layer.sublayers) if (![sub.delegate isKindOfClass:NSView.class]) sub.hidden = YES;   // the blur/native selection, not any content
     if ([objc_getAssociatedObject(view, kMaterialKey) isEqual:drawn] && view.layer.contents) return;
     NSMutableDictionary *o = [NSMutableDictionary dictionaryWithObjectsAndKeys:@"gradient", @"widget", selection ? @"variant.gradient.FinderSideBar" : @"kCUIVariantGradientSideBar", @"kCUIVariantKey", @"normal", @"state", nil];
     if (!active) o[@"kCUIPresentationStateKey"] = @"kCUIPresentationStateInactive";
@@ -719,7 +805,10 @@ static BOOL ApplyLion(CALayer *layer, NSDictionary *options, BOOL result) {
         PaintSidebarDivider(layer, [options[@"kCUIUserInterfaceLayoutDirectionKey"] isEqual:@"kCUIUserInterfaceLayoutDirectionRightToLeft"]);
         return YES;
     }
-    if (IsEmptyInLion(widget)) {
+    NSString *variant = options[@"kCUIVariantKey"];
+    if (IsEmptyInLion(widget) ||
+        ([widget isEqual:@"kCUIWidgetVisualEffectView"] &&
+         ([variant isEqual:@"kCUIVariantSelectionMaterial"] || [variant isEqual:@"kCUIVariantSidebarMaterial"]))) {
         for (CALayer *sub in layer.sublayers) sub.hidden = YES;
         layer.contents = nil;
         layer.backgroundColor = NULL;
@@ -806,6 +895,7 @@ static BOOL HookDraw(id self, SEL _cmd, CGRect frame, CGContextRef cg, NSDiction
 }
 
 static BOOL ReturnNo(id, SEL) { return NO; }
+static BOOL ReturnNo1(id, SEL, id) { return NO; }
 
 // Overrides one method on exactly this class. class_getInstanceMethod finds inherited methods, and setting the implementation
 // of one of those changes it for every class that shares it. If the class does not have its own, it gets one, and `original`
@@ -1066,6 +1156,450 @@ static void HookMenuBackgroundLayout(NSView *self, SEL _cmd) {
     SetContents(layer, contents, scale, CGRectMake(0.49, 0.49, 0.02, 0.02));
     CGImageRelease(contents);
 }
+
+static void (*gOrigMenuWMBackgroundLayout)(NSView *, SEL);
+static void HookMenuWMBackgroundLayout(NSView *self, SEL _cmd) {
+    gOrigMenuWMBackgroundLayout(self, _cmd);
+    CALayer *layer = self.layer;
+    if (!layer || !self.window || self.bounds.size.width < 1) return;
+    uint32_t scale = ScaleOf(@{}, self.window.backingScaleFactor);
+    CGImageRef lion = LionessCopyDrawnImage((__bridge CFDictionaryRef)@{ @"widget": @"kCUIWidgetMenu", @"state": @"normal" }, 64, 64, scale);
+    if (!lion) return;
+    CGImageRef contents = CreateLayerContents(lion, CGSizeMake(64, 64), scale);
+    CGImageRelease(lion);
+    if (!contents) return;
+    for (CALayer *sub in layer.sublayers) if (!sub.delegate) sub.hidden = YES;
+    SetContents(layer, contents, scale, CGRectMake(0.49, 0.49, 0.02, 0.02));
+    CGImageRelease(contents);
+}
+
+// macOS 27 alerts use NSGlassView over _NSAlertPanel; hide it so Lion's solid #EDEDED window frame shows cleanly.
+// Other NSGlassEffectView / SwiftUI .glassEffect() surfaces emit SwiftUI.SDFLayer via HookSolariumEnablement and are
+// replaced with Mountain Lion platters by HookSDFLayout below.
+static void (*gOrigGlassLayout)(NSView *, SEL);
+static void HookGlassLayout(NSView *self, SEL _cmd) {
+    gOrigGlassLayout(self, _cmd);
+    NSWindow *window = self.window;
+    if (!window) return;
+    if ([window isKindOfClass:objc_getClass("_NSAlertPanel")]) {
+        self.hidden = YES;
+        return;
+    }
+    static Class platterCls = objc_getClass("NSToolbarPlatterView");
+    if (platterCls && [self.superview isKindOfClass:platterCls]) {
+        for (NSView *sub in self.subviews)
+            if (strstr(object_getClassName(sub), "_NSCoreHostingView")) sub.hidden = YES;
+    }
+}
+
+static void (*gOrigGlassContainerLayout)(NSView *, SEL);
+static void HookGlassContainerLayout(NSView *self, SEL _cmd) {
+    gOrigGlassContainerLayout(self, _cmd);
+    for (NSView *sub in self.subviews)
+        if (strstr(object_getClassName(sub), "_NSCoreHostingView")) sub.hidden = YES;
+    if (self.layer) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (CALayer *sub in self.layer.sublayers)
+            if ([sub.name isEqualToString:@"NSEffects"] || [NSStringFromClass(sub.class) containsString:@"EffectsLayer"])
+                sub.hidden = YES;
+        [CATransaction commit];
+    }
+}
+
+static void StyleSubduedGlassView(NSView *self) {
+    if (!self.window) return;
+    self.wantsLayer = YES;
+    CALayer *layer = self.layer;
+    if (!layer) return;
+    bool dark = [self.effectiveAppearance.name containsString:@"Dark"];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *sub in layer.sublayers) {
+        if ([sub.name isEqualToString:@"contentHolderView"]) { sub.hidden = NO; continue; }
+        if ([sub.name isEqualToString:@"NSTabBarTrackFilterHost"] ||
+            [NSStringFromClass(sub.class) containsString:@"Backdrop"] ||
+            [NSStringFromClass(sub.class) containsString:@"Chameleon"]) {
+            sub.hidden = YES;
+        }
+    }
+    HideBackdrops(layer);
+    layer.backgroundColor = (dark
+        ? [NSColor colorWithSRGBRed:0.118 green:0.118 blue:0.118 alpha:0.90]
+        : [NSColor colorWithSRGBRed:0.929 green:0.929 blue:0.929 alpha:1.0]).CGColor;
+    layer.borderWidth = 1.0;
+    layer.borderColor = (dark
+        ? [NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:0.18]
+        : [NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:0.15]).CGColor;
+    [CATransaction commit];
+}
+static void (*gOrigSubduedGlassMoved)(NSView *, SEL);
+static void HookSubduedGlassMoved(NSView *self, SEL _cmd) { gOrigSubduedGlassMoved(self, _cmd); StyleSubduedGlassView(self); }
+static void (*gOrigSubduedGlassAppearance)(NSView *, SEL);
+static void HookSubduedGlassAppearance(NSView *self, SEL _cmd) { gOrigSubduedGlassAppearance(self, _cmd); StyleSubduedGlassView(self); }
+static void (*gOrigSubduedGlassKey)(NSView *, SEL);
+static void HookSubduedGlassKey(NSView *self, SEL _cmd) { gOrigSubduedGlassKey(self, _cmd); StyleSubduedGlassView(self); }
+
+static void StyleHardPocket(NSView *self) {
+    if (!self.window) return;
+    self.wantsLayer = YES;
+    CALayer *layer = self.layer;
+    if (!layer) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *sub in layer.sublayers) {
+        if ([sub.name isEqualToString:@"v8"] ||
+            [NSStringFromClass(sub.class) containsString:@"Backdrop"] ||
+            [NSStringFromClass(sub.class) containsString:@"Chameleon"] ||
+            ![sub.delegate isKindOfClass:NSView.class]) {
+            sub.hidden = YES;
+        }
+    }
+    HideBackdrops(layer);
+    layer.backgroundColor = [NSColor colorWithSRGBRed:0.929 green:0.929 blue:0.929 alpha:1.0].CGColor;
+    [CATransaction commit];
+}
+static void (*gOrigHardPocketLayout)(NSView *, SEL);
+static void HookHardPocketLayout(NSView *self, SEL _cmd) { gOrigHardPocketLayout(self, _cmd); StyleHardPocket(self); }
+static void (*gOrigHardPocketMoved)(NSView *, SEL);
+static void HookHardPocketMoved(NSView *self, SEL _cmd) { gOrigHardPocketMoved(self, _cmd); StyleHardPocket(self); }
+static void (*gOrigScrollPocketLayout)(NSView *, SEL);
+static void HookScrollPocketLayout(NSView *self, SEL _cmd) {
+    gOrigScrollPocketLayout(self, _cmd);
+    for (NSView *sub in self.subviews)
+        if (strstr(object_getClassName(sub), "PocketBlur")) sub.hidden = YES;
+}
+
+// SwiftUI .glassEffect() and AppKit NSGlassEffectView both resolve their layers through DesignLibrary's
+// GlassMaterialProvider.Resolved.resolveLayers(in:), which returns [] when Solarium is disabled — making all
+// glass platters (Control Center, Notification Center, Maps popovers/sidebar, Screenshot HUD) completely transparent.
+// Narrowly allow ONLY resolveLayers(in:) to see EnablementLevel.enabled so SwiftUI.SDFLayer emits exact platter
+// geometry, then neutralize all SDF/glass shaders in HookSDFLayout and paint Mountain Lion platters behind the portal.
+#if defined(__aarch64__)
+static uintptr_t gResolveLayersStart = 0;
+static uintptr_t gResolveLayersEnd = 0;
+extern "C" __attribute__((used)) void *gOrigSolariumEnablementRaw = NULL;
+
+extern "C" __attribute__((used))
+int LionessShouldForceGlassEnablement(void *retAddr) {
+    uintptr_t pc = (uintptr_t)ptrauth_strip(retAddr, ptrauth_key_return_address);
+    return (gResolveLayersStart && pc >= gResolveLayersStart && pc < gResolveLayersEnd) ? 1 : 0;
+}
+
+__attribute__((naked))
+static void HookSolariumEnablement(const uint8_t *idiom) {
+    __asm__ volatile (
+#if __has_feature(ptrauth_calls)
+        "pacibsp\n"
+#endif
+        "stp x0, x8, [sp, #-32]!\n"
+        "stp x29, x30, [sp, #16]\n"
+        "mov x0, x30\n"
+        "bl _LionessShouldForceGlassEnablement\n"
+        "cbz w0, 1f\n"
+        "ldp x29, x30, [sp, #16]\n"
+        "ldp x0, x8, [sp], #32\n"
+        "mov w9, #2\n"
+        "strb w9, [x8]\n"
+#if __has_feature(ptrauth_calls)
+        "retab\n"
+#else
+        "ret\n"
+#endif
+        "1:\n"
+        "ldp x29, x30, [sp, #16]\n"
+        "ldp x0, x8, [sp], #32\n"
+#if __has_feature(ptrauth_calls)
+        "autibsp\n"
+#endif
+        "adrp x16, _gOrigSolariumEnablementRaw@PAGE\n"
+        "ldr x16, [x16, _gOrigSolariumEnablementRaw@PAGEOFF]\n"
+        "br x16\n"
+    );
+}
+#endif
+
+static const void *const kGlassDarkKey = &kGlassDarkKey;
+
+static void CollectSDFElements(CALayer *layer, NSMutableArray<CALayer *> *out) {
+    static Class elemCls = Nil;
+    if (!elemCls) elemCls = objc_getClass("CASDFElementLayer");
+    if (elemCls && [layer isKindOfClass:elemCls]) { [out addObject:layer]; return; }
+    for (CALayer *sub in layer.sublayers) CollectSDFElements(sub, out);
+}
+
+static BOOL LayerContainsSDF(CALayer *layer, Class sdfCls) {
+    if (!sdfCls) return NO;
+    if ([layer isKindOfClass:sdfCls]) return YES;
+    for (CALayer *sub in layer.sublayers) if (LayerContainsSDF(sub, sdfCls)) return YES;
+    return NO;
+}
+
+static bool IsControlCenterProcess(void) {
+    static bool cc = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.controlcenter"];
+    return cc;
+}
+static bool IsNotificationCenterProcess(void) {
+    static bool nc = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.notificationcenterui"];
+    return nc;
+}
+static bool IsNotificationCenterDrawer(NSWindow *window) {
+    if (!window || !IsNotificationCenterProcess()) return false;
+    if (strstr(object_getClassName(window), "NotificationCenterWindow")) return true;
+    NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+    return screen && window.frame.size.height >= screen.visibleFrame.size.height * 0.7;
+}
+
+// Mountain Lion's dark linen texture, fetched from ml-root via appkitd and tiled inside Notification Center cards.
+static CGImageRef CopyLinenTile(void) {
+    static CGImageRef tile;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *req = @{ @"widget": @"lioness.image",
+                               @"source": @"/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/NSTexturedFullScreenBackgroundColor.png" };
+        CGImageRef lion = LionessCopyDrawnImage((__bridge CFDictionaryRef)req, 256, 256, 1);
+        if (!lion) return;
+        tile = CGImageCreateWithImageInRect(lion, CGRectMake(LIONESS_PADDING, LIONESS_PADDING, 256, 256));
+        CGImageRelease(lion);
+    });
+    return tile ? CGImageRetain(tile) : NULL;
+}
+
+static void PopulateLinenCard(CALayer *platter, CGRect r, CGFloat cr) {
+    // Outer layer holds the soft drop shadow (masksToBounds = NO) and crisp dark outer rim;
+    // inner clipped layer holds the 2D tiled Mountain Lion linen, subtle sheen, and 1px metallic inner highlight.
+    platter.masksToBounds = NO;
+    platter.backgroundColor = NULL;
+    platter.borderWidth = 0;
+    platter.shadowColor = NSColor.blackColor.CGColor;
+    platter.shadowOpacity = 0.55f;
+    platter.shadowRadius = 6.0;
+    platter.shadowOffset = CGSizeMake(0, -2);
+    CGPathRef shadowPath = CGPathCreateWithRoundedRect(CGRectMake(0, 0, r.size.width, r.size.height), cr, cr, NULL);
+    platter.shadowPath = shadowPath;
+    CGPathRelease(shadowPath);
+
+    CALayer *clip = [CALayer layer];
+    clip.frame = CGRectMake(0, 0, r.size.width, r.size.height);
+    clip.cornerRadius = cr;
+    clip.cornerCurve = kCACornerCurveCircular;
+    clip.masksToBounds = YES;
+    clip.backgroundColor = [NSColor colorWithSRGBRed:0.20 green:0.21 blue:0.23 alpha:1.0].CGColor;
+    clip.borderWidth = 1.0;
+    clip.borderColor = [NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:0.78].CGColor;
+
+    CGImageRef tileImg = CopyLinenTile();
+    if (tileImg) {
+        CAReplicatorLayer *rows = [CAReplicatorLayer layer];
+        rows.frame = clip.bounds;
+        rows.instanceCount = (NSInteger)ceil(r.size.height / 256.0);
+        rows.instanceTransform = CATransform3DMakeTranslation(0, 256, 0);
+        CAReplicatorLayer *cols = [CAReplicatorLayer layer];
+        cols.frame = CGRectMake(0, 0, r.size.width, 256);
+        cols.instanceCount = (NSInteger)ceil(r.size.width / 256.0);
+        cols.instanceTransform = CATransform3DMakeTranslation(256, 0, 0);
+        CALayer *tile = [CALayer layer];
+        tile.frame = CGRectMake(0, 0, 256, 256);
+        tile.contents = (__bridge id)tileImg;
+        tile.contentsScale = 1;
+        tile.contentsGravity = kCAGravityTopLeft;
+        [cols addSublayer:tile];
+        [rows addSublayer:cols];
+        [clip addSublayer:rows];
+        CGImageRelease(tileImg);
+    }
+
+    // Subtle Mountain Lion top-edge metallic bevel highlight + bottom vignette over the linen.
+    CAGradientLayer *sheen = [CAGradientLayer layer];
+    sheen.frame = clip.bounds;
+    sheen.colors = @[
+        (__bridge id)[NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:0.13].CGColor,
+        (__bridge id)[NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:0.02].CGColor,
+        (__bridge id)[NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:0.18].CGColor,
+    ];
+    sheen.locations = @[ @0.0, @0.35, @1.0 ];
+    [clip addSublayer:sheen];
+
+    // Crisp 1px steel-silver metallic inner outline (inset inside the 1px dark outer bevel).
+    CALayer *rim = [CALayer layer];
+    rim.frame = CGRectInset(clip.bounds, 1.0, 1.0);
+    rim.cornerRadius = MAX(0, cr - 1.0);
+    rim.cornerCurve = kCACornerCurveCircular;
+    rim.borderWidth = 1.0;
+    rim.borderColor = [NSColor colorWithSRGBRed:0.78 green:0.82 blue:0.87 alpha:0.35].CGColor;
+    [clip addSublayer:rim];
+
+    [platter addSublayer:clip];
+}
+
+static NSWindow *WindowForLayer(CALayer *layer) {
+    for (CALayer *l = layer; l; l = l.superlayer) {
+        if ([l.delegate isKindOfClass:NSView.class]) return ((NSView *)l.delegate).window;
+    }
+    return nil;
+}
+
+static bool UsesLinenCards(NSWindow *window) {
+    return IsControlCenterProcess() || IsNotificationCenterDrawer(window);
+}
+
+static BOOL IsDarkForSDFLayer(CALayer *layer) {
+    NSWindow *win = WindowForLayer(layer);
+    if (UsesLinenCards(win)) return YES;
+    if (IsNotificationCenterProcess()) return NO;   // regular notification banners: light card + black text
+    NSNumber *cached = objc_getAssociatedObject(layer, kGlassDarkKey);
+    if (cached) return cached.boolValue;
+    for (CALayer *l = layer; l; l = l.superlayer) {
+        id del = l.delegate;
+        if ([del isKindOfClass:NSView.class]) {
+            NSView *v = (NSView *)del;
+            NSAppearance *app = v.window.appearance ?: v.effectiveAppearance;
+            return [app.name containsString:@"Dark"];
+        }
+    }
+    return NO;
+}
+
+static void (*gOrigSDFLayout)(CALayer *, SEL);
+static void HookSDFLayout(CALayer *self, SEL _cmd) {
+    gOrigSDFLayout(self, _cmd);
+
+    static Class backdropCls = Nil, sdfCls = Nil;
+    if (!backdropCls) backdropCls = objc_getClass("CABackdropLayer");
+    if (!sdfCls) sdfCls = objc_getClass("CASDFLayer");
+
+    CALayer *effectContainer = nil;
+    for (CALayer *sub in self.sublayers) {
+        for (CALayer *child in sub.sublayers) {
+            if ((backdropCls && [child isKindOfClass:backdropCls]) ||
+                (sdfCls && [child isKindOfClass:sdfCls])) {
+                effectContainer = sub;
+                break;
+            }
+        }
+        if (effectContainer) break;
+    }
+    if (!effectContainer) return;
+
+    NSMutableArray<CALayer *> *elements = [NSMutableArray array];
+    NSMutableArray<CALayer *> *oldPlatters = [NSMutableArray array];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    for (CALayer *child in effectContainer.sublayers) {
+        if ([child.name isEqualToString:@"lioness.glassPlatter"]) {
+            [oldPlatters addObject:child];
+            continue;
+        }
+        if (strstr(object_getClassName(child), "SDFPortalLayer")) {
+            if (UsesLinenCards(WindowForLayer(self))) {
+                child.shadowColor = NSColor.blackColor.CGColor;
+                child.shadowOpacity = 0.75f;
+                child.shadowRadius = 0;
+                child.shadowOffset = CGSizeMake(0, -1);
+            }
+            continue;
+        }
+
+        if (backdropCls && [child isKindOfClass:backdropCls]) {
+            id f0 = child.filters.firstObject;
+            if (f0) {
+                @try {
+                    NSNumber *darken = [f0 valueForKey:@"inputBlurFillDarkenOpacity"];
+                    NSNumber *lighten = [f0 valueForKey:@"inputBlurFillLightenOpacity"];
+                    NSNumber *maxLuma = [f0 valueForKey:@"inputFaceColorMatrixMaxLuma"];
+                    BOOL isDark = (darken.doubleValue > lighten.doubleValue) ||
+                                  (maxLuma && maxLuma.doubleValue < 0.75);
+                    objc_setAssociatedObject(self, kGlassDarkKey, @(isDark), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                } @catch (NSException *) {}
+            }
+            CollectSDFElements(child, elements);
+            child.filters = nil;
+            child.hidden = YES;
+        } else if (LayerContainsSDF(child, sdfCls)) {
+            child.filters = nil;
+            child.hidden = YES;
+        }
+    }
+
+    for (CALayer *old in oldPlatters) [old removeFromSuperlayer];
+
+    NSWindow *win = WindowForLayer(self);
+    bool linenCard = UsesLinenCards(win);
+
+    BOOL dark = IsDarkForSDFLayer(self);
+    CGColorRef bgColor = dark
+        ? [NSColor colorWithSRGBRed:0.14 green:0.14 blue:0.14 alpha:0.92].CGColor
+        : [NSColor colorWithSRGBRed:0.93 green:0.93 blue:0.93 alpha:0.96].CGColor;
+    CGColorRef borderColor = dark
+        ? [NSColor colorWithSRGBRed:1.0 green:1.0 blue:1.0 alpha:0.18].CGColor
+        : [NSColor colorWithSRGBRed:0.0 green:0.0 blue:0.0 alpha:0.20].CGColor;
+
+    auto makePlatter = ^(CGRect r, CGFloat cr) {
+        if (r.size.width < 1 || r.size.height < 1) return;
+        if (r.size.height > 40 && cr > 6.0) cr = 6.0;
+        CALayer *platter = [CALayer layer];
+        platter.name = @"lioness.glassPlatter";
+        platter.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"frame": NSNull.null };
+        platter.frame = r;
+        if (linenCard) {
+            PopulateLinenCard(platter, r, cr);
+        } else {
+            platter.cornerRadius = cr;
+            platter.cornerCurve = kCACornerCurveCircular;
+            platter.masksToBounds = YES;
+            platter.backgroundColor = bgColor;
+            platter.borderWidth = 1.0;
+            platter.borderColor = borderColor;
+        }
+        [effectContainer insertSublayer:platter atIndex:0];
+    };
+
+    if (elements.count == 0) {
+        makePlatter(effectContainer.bounds, 6.0);
+    } else {
+        for (CALayer *el in elements) {
+            CGRect r = [effectContainer convertRect:el.bounds fromLayer:el];
+            makePlatter(r, el.cornerRadius);
+        }
+    }
+
+    [CATransaction commit];
+}
+
+static void TryInstallGlassHooks(void) {
+#if defined(__aarch64__)
+    static bool enableHooked = false;
+    if (!enableHooked) {
+        void *resolveAddr = DobbySymbolResolver("DesignLibrary", "$s13DesignLibrary21GlassMaterialProviderV8ResolvedV13resolveLayers2inSay7SwiftUI0D0VAHE5LayerVGAjHE7ContextV_tF");
+        if (!resolveAddr) resolveAddr = dlsym(RTLD_DEFAULT, "$s13DesignLibrary21GlassMaterialProviderV8ResolvedV13resolveLayers2inSay7SwiftUI0D0VAHE5LayerVGAjHE7ContextV_tF");
+        void *enableAddr = DobbySymbolResolver("SwiftUICore", "$s7SwiftUI8SolariumV10enablementyAC15EnablementLevelOAC0E5IdiomOFZ");
+        if (!enableAddr) enableAddr = dlsym(RTLD_DEFAULT, "$s7SwiftUI8SolariumV10enablementyAC15EnablementLevelOAC0E5IdiomOFZ");
+        if (resolveAddr && enableAddr) {
+            gResolveLayersStart = (uintptr_t)ptrauth_strip(resolveAddr, ptrauth_key_function_pointer);
+            gResolveLayersEnd = gResolveLayersStart + 0x500;
+            void *orig = NULL;
+            if (DobbyHook(enableAddr, (void *)HookSolariumEnablement, &orig) == 0) {
+                gOrigSolariumEnablementRaw = ptrauth_strip(orig, ptrauth_key_function_pointer);
+                enableHooked = true;
+            }
+        }
+    }
+#endif
+    static bool sdfHooked = false;
+    if (!sdfHooked && objc_getClass("_TtC7SwiftUI8SDFLayer")) {
+        Override("_TtC7SwiftUI8SDFLayer", @selector(layoutSublayers), (IMP)HookSDFLayout, &gOrigSDFLayout);
+        sdfHooked = true;
+    }
+}
+
+static void OnImageAddedForGlass(const struct mach_header *mh, intptr_t slide) {
+    (void)mh; (void)slide;
+    TryInstallGlassHooks();
+}
+
+static BOOL ReturnYes(id, SEL) { return YES; }
 
 static void DressSidebarRow(NSTableRowView *row);
 static void ApplyMenuRow(NSTableRowView *row) {
@@ -1338,6 +1872,11 @@ static void HookMaterialLayout(NSVisualEffectView *self, SEL _cmd) {
     gOrigMaterialLayout(self, _cmd);
     UpdateMaterial(self);
 }
+static void (*gOrigMaterialUpdateLayer)(NSVisualEffectView *, SEL);
+static void HookMaterialUpdateLayer(NSVisualEffectView *self, SEL _cmd) {
+    gOrigMaterialUpdateLayer(self, _cmd);
+    UpdateMaterial(self);
+}
 static void (*gOrigRowEmphasized)(NSTableRowView *, SEL, BOOL);
 static void HookRowEmphasized(NSTableRowView *self, SEL _cmd, BOOL emphasized) {
     gOrigRowEmphasized(self, _cmd, emphasized);
@@ -1358,9 +1897,10 @@ static void UpdateBottomBars(NSView *view) {
 static void ObserveMainWindow(void) {
     for (NSString *name in @[ NSWindowDidBecomeMainNotification, NSWindowDidResignMainNotification, NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification ]) {
         [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *note) {
-            CALayer *root = ((NSWindow *)note.object).contentView.superview.layer;
+            NSWindow *win = (NSWindow *)note.object;
+            CALayer *root = win.contentView.superview.layer;
             if (root) UpdateTitlebarBackgrounds(root);
-            if (NSView *frame = ((NSWindow *)note.object).contentView.superview) UpdateBottomBars(frame);
+            if (NSView *frame = win.contentView.superview) UpdateBottomBars(frame);
             for (CALayer *divider in gSidebarDividers) {
                 id owner = divider.delegate;
                 PaintSidebarDivider(divider, [owner isKindOfClass:NSView.class] && ((NSView *)owner).userInterfaceLayoutDirection == NSUserInterfaceLayoutDirectionRightToLeft);
@@ -1446,24 +1986,152 @@ static int HookBezelBlend(id self, SEL _cmd, id appearance, CGRect bounds, BOOL 
 // and more. Only on AppKit's and SwiftUI's own view layers, and not destOut, which is a mask (the slider cuts its track with it),
 // not a colour blend. An app's own layers keep their filters. Toolbar image views keep theirs too: AppKit tints
 // template images pale on the assumption that plusD will darken them, and they go faint without it.
+// Control Center draws a large pill/capsule hover overlay (__showSelectionCapsule / _ModuleHoverIndicator)
+// matching Solarium's 24pt corners. Clamp non-circle SwiftUI layers larger than icon buttons to Lion's 6pt
+// radius and soften opaque/dark hover fills into a subtle dim over the linen card.
+static bool IsSwiftUILayerDelegate(id delegate) {
+    if (!delegate) return false;
+    static Class swiftUIDel = Nil;
+    if (!swiftUIDel) swiftUIDel = objc_getClass("_SwiftUILayerDelegate");
+    return swiftUIDel && (delegate == (id)swiftUIDel || [delegate isKindOfClass:swiftUIDel]);
+}
+
+static bool IsControlCenterVibrantHoverFill(CGColorRef color, bool *outIsPressed) {
+    if (!color) return false;
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGColorRef c = srgb ? CGColorCreateCopyByMatchingToColorSpace(srgb, kCGRenderingIntentDefault, color, NULL) : NULL;
+    if (srgb) CGColorSpaceRelease(srgb);
+    if (!c) return false;
+    bool match = false;
+    const CGFloat *comps = CGColorGetComponents(c);
+    size_t n = CGColorGetNumberOfComponents(c);
+    if (comps && n >= 4) {
+        CGFloat r = comps[0], g = comps[1], b = comps[2], a = comps[3];
+        // Inside .glassEffect + .dark, .fill.quinary (hover) is rgba(0.027,0.027,0.027,1.0) + plusL,
+        // and .fill.quaternary (press) is rgba(0.035,0.035,0.035,1.0) + plusL.
+        if (a >= 0.99 && r <= 0.12 && g <= 0.12 && b <= 0.12 && fabs(r - g) < 0.02 && fabs(g - b) < 0.02) {
+            match = true;
+            if (outIsPressed) *outIsPressed = (r > 0.031);
+        }
+    }
+    CGColorRelease(c);
+    return match;
+}
+
+static void (*gOrigCCSetCornerRadius)(CALayer *, SEL, CGFloat);
+static void (*gOrigCCSetBounds)(CALayer *, SEL, CGRect);
+static void (*gOrigCCSetBackgroundColor)(CALayer *, SEL, CGColorRef);
 static void (*gOrigSetFilter)(CALayer *, SEL, id);
+
+static void AdjustControlCenterHoverLayer(CALayer *layer, bool fromVibrantFilter) {
+    if (!IsSwiftUILayerDelegate(layer.delegate)) return;
+    CGSize sz = layer.bounds.size;
+    if (sz.width <= 40 || sz.height <= 40) return;   // keep <=40pt circular icon buttons, slider tracks & thumbs round
+    if (layer.cornerRadius > 6.0) {
+        gOrigCCSetCornerRadius(layer, @selector(setCornerRadius:), 6.0);
+        layer.cornerCurve = kCACornerCurveCircular;
+    }
+    if (!layer.contents && layer.backgroundColor) {
+        CGFloat alpha = CGColorGetAlpha(layer.backgroundColor);
+        bool isPressed = false;
+        bool isVibrantFill = IsControlCenterVibrantHoverFill(layer.backgroundColor, &isPressed);
+        if (fromVibrantFilter || isVibrantFill || (alpha >= 0.004 && alpha < 0.99)) {
+            CGFloat dimAlpha = isPressed ? 0.30 : 0.20;
+            gOrigCCSetBackgroundColor(layer, @selector(setBackgroundColor:),
+                [NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:dimAlpha].CGColor);
+            if (layer.compositingFilter && gOrigSetFilter)
+                gOrigSetFilter(layer, @selector(setCompositingFilter:), nil);
+        }
+    }
+}
+static void HookCCSetCornerRadius(CALayer *self, SEL _cmd, CGFloat radius) {
+    if (radius > 6.0 && IsSwiftUILayerDelegate(self.delegate)) {
+        CGSize sz = self.bounds.size;
+        if (sz.width > 40 && sz.height > 40) {
+            radius = 6.0;
+            self.cornerCurve = kCACornerCurveCircular;
+        }
+    }
+    gOrigCCSetCornerRadius(self, _cmd, radius);
+}
+static void HookCCSetBounds(CALayer *self, SEL _cmd, CGRect bounds) {
+    gOrigCCSetBounds(self, _cmd, bounds);
+    AdjustControlCenterHoverLayer(self, false);
+}
+static void HookCCSetBackgroundColor(CALayer *self, SEL _cmd, CGColorRef color) {
+    gOrigCCSetBackgroundColor(self, _cmd, color);
+    if (color) AdjustControlCenterHoverLayer(self, false);
+}
+
 static void HookSetFilter(CALayer *self, SEL _cmd, id filter) {
     id delegate = self.delegate;
-    bool ours = [delegate isKindOfClass:NSView.class] || [delegate isKindOfClass:objc_getClass("_SwiftUILayerDelegate")];   // SwiftUI lists: plusD, vibrant matrix
-    if (filter && ours && ![delegate isKindOfClass:objc_getClass("NSToolbarImageView")]) {
+    bool isCCSwiftUIHover = false;
+    if (filter && IsControlCenterProcess() && IsSwiftUILayerDelegate(delegate) && !self.contents) {
+        CGSize sz = self.bounds.size;
+        NSString *name = [filter description];
+        if (sz.width > 40 && sz.height > 40 && ([name containsString:@"plusL"] || [name containsString:@"plusD"])) {
+            filter = nil;
+            isCCSwiftUIHover = true;
+        }
+    } else if (filter && [delegate isKindOfClass:NSView.class] && ![delegate isKindOfClass:objc_getClass("NSToolbarImageView")]) {
         NSString *name = [filter description];
         if (![name containsString:@"destOut"] && ![name containsString:@"destIn"] && ![name containsString:@"sourceIn"] && ![name containsString:@"sourceOut"]) filter = nil;
     }
     gOrigSetFilter(self, _cmd, filter);
+    if (isCCSwiftUIHover) AdjustControlCenterHoverLayer(self, true);
 }
 
 // Inside a visual effect view everything inherits VibrantLight, whatever the app's appearance, and that is what asks for
 // plusD and translucent colours. No control sits on a live material here, so nothing should be vibrant.
+// Also normalize DarkAqua / VibrantDark inside non-transparent titlebars and toolbars (e.g. Maps satellite mode) so
+// toolbar icons stay dark on Lion's light chrome, while keeping DarkAqua on selected dark segment items.
+static bool IsInTitlebarOrToolbar(NSView *view) {
+    static Class titlebarContainer = objc_getClass("NSTitlebarContainerView");
+    static Class titlebar = objc_getClass("NSTitlebarView");
+    static Class toolbar = objc_getClass("NSToolbarView");
+    for (NSView *v = view; v; v = v.superview) {
+        if ((titlebarContainer && [v isKindOfClass:titlebarContainer]) ||
+            (titlebar && [v isKindOfClass:titlebar]) ||
+            (toolbar && [v isKindOfClass:toolbar])) return true;
+    }
+    return false;
+}
 static NSAppearance *(*gOrigEffectiveAppearance)(NSView *, SEL);
 static NSAppearance *HookEffectiveAppearance(NSView *self, SEL _cmd) {
     NSAppearance *appearance = gOrigEffectiveAppearance(self, _cmd);
     static NSAppearance *aqua = [[NSAppearance appearanceNamed:NSAppearanceNameAqua] retain];
-    return [appearance.name isEqualToString:NSAppearanceNameVibrantLight] ? aqua : appearance;
+    static NSAppearance *darkAqua = [[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua] retain];
+    NSWindow *window = self.window;
+    if (UsesLinenCards(window)) return darkAqua;
+    if (IsNotificationCenterProcess()) return aqua;   // regular notification banners: black text on white
+    if ([appearance.name isEqualToString:NSAppearanceNameVibrantLight]) return aqua;
+    if ([appearance.name containsString:@"Dark"]) {
+        static Class segmentItem = objc_getClass("NSSegmentItemView");
+        if (segmentItem) {
+            for (NSView *v = self.superview; v; v = v.superview)
+                if ([v isKindOfClass:segmentItem]) return appearance;
+        }
+        if (window && !window.titlebarAppearsTransparent && IsInTitlebarOrToolbar(self)) return aqua;
+    }
+    return appearance;
+}
+
+static NSAppearance *(*gOrigWindowEffectiveAppearance)(NSWindow *, SEL);
+static NSAppearance *HookWindowEffectiveAppearance(NSWindow *self, SEL _cmd) {
+    static NSAppearance *aqua = [[NSAppearance appearanceNamed:NSAppearanceNameAqua] retain];
+    static NSAppearance *darkAqua = [[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua] retain];
+    if (UsesLinenCards(self)) return darkAqua;
+    if (IsNotificationCenterProcess()) return aqua;
+    return gOrigWindowEffectiveAppearance(self, _cmd);
+}
+
+static NSAppearance *(*gOrigWindowAppearance)(NSWindow *, SEL);
+static NSAppearance *HookWindowAppearance(NSWindow *self, SEL _cmd) {
+    static NSAppearance *aqua = [[NSAppearance appearanceNamed:NSAppearanceNameAqua] retain];
+    static NSAppearance *darkAqua = [[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua] retain];
+    if (UsesLinenCards(self)) return darkAqua;
+    if (IsNotificationCenterProcess()) return aqua;
+    return gOrigWindowAppearance(self, _cmd);
 }
 static BOOL NotVibrant(id, SEL) { return NO; }
 static void DisableVibrancy(void) {
@@ -1506,8 +2174,12 @@ static void UseLionColors(void) {
         NSColor *color = [[NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1] retain];
         method_setImplementation(method, imp_implementationWithBlock(^NSColor *(id) { return color; }));
     }
-    static const struct { const char *name; CGFloat alpha; } labels[] = { { "labelColor", 1 }, { "secondaryLabelColor", 0.55 }, { "tertiaryLabelColor", 0.25 }, { "quaternaryLabelColor", 0.1 }, { "windowFrameTextColor", 1 } };
+    static const struct { const char *name; CGFloat alpha; bool ncOnly; } labels[] = {
+        { "labelColor", 1, false }, { "secondaryLabelColor", 0.55, false }, { "tertiaryLabelColor", 0.25, false }, { "quaternaryLabelColor", 0.1, false },
+        { "windowFrameTextColor", 1, false }, { "controlTextColor", 1, true }, { "textColor", 1, true }, { "headerTextColor", 1, true }
+    };
     for (const auto &c : labels) {
+        if (c.ncOnly && !IsNotificationCenterProcess() && !IsControlCenterProcess()) continue;
         Method method = class_getClassMethod(NSColor.class, sel_registerName(c.name));
         if (!method) continue;
         NSColor *light = [[NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:c.alpha] retain];
@@ -1700,7 +2372,7 @@ static void DressSidebarContent(NSView *view, bool selected) {
 }
 static void DressSidebarRow(NSTableRowView *row) {
     if (!LionessIsReachable() || !IsInSidebar(row)) return;
-    bool selected = row.isSelected && row.isEmphasized;
+    bool selected = row.isSelected;
     for (NSView *sub in row.subviews)
         if (![sub isKindOfClass:NSVisualEffectView.class]) DressSidebarContent(sub, selected);
 }
@@ -1947,6 +2619,7 @@ static bool DressMenuBarWindow(NSWindow *window) {
         gOrigLayerRemove([gBarSelections objectForKey:selection], @selector(removeFromSuperlayer));
         [gBarSelections removeObjectForKey:selection];
     }
+    if (!window.hasShadow) window.hasShadow = YES;
     bool barDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuBar", @"state": @"normal", @"is.flipped": @NO }, 64, (uint32_t)ceil(height));
     bool selectionDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuTitle", @"state": @"pressed", @"is.flipped": @NO }, 64, (uint32_t)ceil(height), barDark);
     bool selecting = false;
@@ -1955,11 +2628,19 @@ static bool DressMenuBarWindow(NSWindow *window) {
         for (CALayer *sub in view.layer.sublayers) if ([sub.name isEqual:kBarTitleLayer]) title = sub;
         selecting |= title != nil;
         bool onDark = title ? selectionDark : barDark;
-        // Titles draw black and status items white, so each is inverted when the surface wants the other. The blue is inverted back.
+        // Titles draw black; remote status items draw white on dark wallpaper and black on light wallpaper.
         bool invert;
-        if (IsNamed(view, "AppMenuItemView")) invert = onDark;
-        else if (IsNamed(view, "SceneHostDisplayItemContainerView")) invert = !onDark;
-        else continue;
+        if (IsNamed(view, "AppMenuItemView")) {
+            invert = onDark;
+            view.layer.shadowColor = NSColor.whiteColor.CGColor;
+            view.layer.shadowOpacity = onDark ? 0 : 0.55f;
+            view.layer.shadowRadius = 0;
+            view.layer.shadowOffset = CGSizeMake(0, -1);
+        } else if (IsNamed(view, "SceneHostDisplayItemContainerView")) {
+            NSAppearance *itemApp = view.appearance ?: hit.appearance ?: window.appearance ?: window.effectiveAppearance;
+            bool statusIsWhite = [itemApp.name containsString:@"Dark"];
+            invert = (statusIsWhite != onDark);
+        } else continue;
         SetInverted(view.layer, invert);
         SetInverted(title, invert);
     }
@@ -2013,11 +2694,16 @@ static void HookBarInsertSublayer(CALayer *self, SEL _cmd, CALayer *sublayer, un
     BarLayerGainedSublayer(self, sublayer);
 }
 
-// The agent recolours every status item as if it were white, as the system's are. A skinned app's title is black, so it says otherwise.
+// Match the status item window's appearance so MenuBarAgent's inversion logic stays consistent on both light and dark wallpapers.
 static void (*gOrigStatusButtonTitle)(NSButton *, SEL, NSString *);
 static void HookStatusButtonTitle(NSButton *self, SEL _cmd, NSString *title) {
     gOrigStatusButtonTitle(self, _cmd, title);
-    if (title.length) self.attributedTitle = [[[NSAttributedString alloc] initWithString:title attributes:@{ NSForegroundColorAttributeName: NSColor.whiteColor, NSFontAttributeName: self.font ?: [NSFont menuBarFontOfSize:0] }] autorelease];
+    if (title.length) {
+        NSAppearance *app = self.window.appearance ?: self.effectiveAppearance;
+        bool dark = [app.name containsString:@"Dark"];
+        NSColor *fg = dark ? NSColor.whiteColor : NSColor.blackColor;
+        self.attributedTitle = [[[NSAttributedString alloc] initWithString:title attributes:@{ NSForegroundColorAttributeName: fg, NSFontAttributeName: self.font ?: [NSFont menuBarFontOfSize:0] }] autorelease];
+    }
 }
 
 static void InstallMenuBar(void) {
@@ -2063,6 +2749,7 @@ static void Install(void) {
     Override("NSTitlebarBackgroundView", @selector(updateLayer), (IMP)HookBackgroundUpdateLayer, &gOrigBackgroundUpdateLayer);
     Override("NSSplitViewItemAccessoryClipView", @selector(layout), (IMP)HookAccessoryLayout, &gOrigAccessoryLayout);
     Override("NSVisualEffectView", @selector(layout), (IMP)HookMaterialLayout, &gOrigMaterialLayout);
+    Override("NSVisualEffectView", @selector(updateLayer), (IMP)HookMaterialUpdateLayer, &gOrigMaterialUpdateLayer);
     Override("NSTabBar", @selector(layout), (IMP)HookTabBarLayout, &gOrigTabBarLayout);
     Override("_NSSplitViewItemViewWrapper", @selector(setFrame:), (IMP)HookWrapperSetFrame, &gOrigWrapperSetFrame);
     Override("NSVibrantSplitDividerView", @selector(layout), (IMP)HookVibrantDividerLayout, &gOrigVibrantDividerLayout);
@@ -2077,7 +2764,14 @@ static void Install(void) {
     DisableStyledText();
     DisableBlendModes();
     Override("CALayer", @selector(setCompositingFilter:), (IMP)HookSetFilter, &gOrigSetFilter);
+    if (IsControlCenterProcess()) {
+        Override("CALayer", @selector(setCornerRadius:), (IMP)HookCCSetCornerRadius, &gOrigCCSetCornerRadius);
+        Override("CALayer", @selector(setBounds:), (IMP)HookCCSetBounds, &gOrigCCSetBounds);
+        Override("CALayer", @selector(setBackgroundColor:), (IMP)HookCCSetBackgroundColor, &gOrigCCSetBackgroundColor);
+    }
     Override("NSView", @selector(effectiveAppearance), (IMP)HookEffectiveAppearance, &gOrigEffectiveAppearance);
+    Override("NSWindow", @selector(effectiveAppearance), (IMP)HookWindowEffectiveAppearance, &gOrigWindowEffectiveAppearance);
+    Override("NSWindow", @selector(appearance), (IMP)HookWindowAppearance, &gOrigWindowAppearance);
     DisableVibrancy();
     UseLionColors();
     InstallGlyphs();
@@ -2096,6 +2790,30 @@ static void Install(void) {
     Override("NSPopupMenuWindow", sel_registerName("_cornerMaskShouldDefineShadow"), (IMP)HookMenuMaskDefinesShadow, &gOrigMenuMaskDefinesShadow);
     Override("NSPopupMenuWindow", sel_registerName("_commonPresentFromView:animated:"), (IMP)HookMenuPresent, &gOrigMenuPresent);
     Override("NSRootMenuWindowBackgroundView", @selector(layout), (IMP)HookMenuBackgroundLayout, &gOrigMenuBackgroundLayout);
+    if (objc_getClass("NSMenuWindowManagerBackgroundView"))
+        Override("NSMenuWindowManagerBackgroundView", @selector(layout), (IMP)HookMenuWMBackgroundLayout, &gOrigMenuWMBackgroundLayout);
+    if (objc_getClass("NSGlassEffectView"))
+        Override("NSGlassEffectView", @selector(layout), (IMP)HookGlassLayout, &gOrigGlassLayout);
+    if (objc_getClass("NSGlassEffectContainerView"))
+        Override("NSGlassEffectContainerView", @selector(layout), (IMP)HookGlassContainerLayout, &gOrigGlassContainerLayout);
+    const char *subduedCls = "_TtC6AppKitP33_C7B8466D3EAE829EF20F43530A1CD21C24NSSubduedGlassEffectView";
+    if (objc_getClass(subduedCls)) {
+        Override(subduedCls, @selector(viewDidMoveToWindow), (IMP)HookSubduedGlassMoved, &gOrigSubduedGlassMoved);
+        Override(subduedCls, @selector(viewDidChangeEffectiveAppearance), (IMP)HookSubduedGlassAppearance, &gOrigSubduedGlassAppearance);
+        Override(subduedCls, sel_registerName("_windowChangedKeyState"), (IMP)HookSubduedGlassKey, &gOrigSubduedGlassKey);
+    }
+    if (objc_getClass("NSHardPocketView")) {
+        Override("NSHardPocketView", @selector(layout), (IMP)HookHardPocketLayout, &gOrigHardPocketLayout);
+        Override("NSHardPocketView", @selector(viewDidMoveToWindow), (IMP)HookHardPocketMoved, &gOrigHardPocketMoved);
+    }
+    if (objc_getClass("NSScrollPocket")) {
+        Override("NSScrollPocket", sel_registerName("prefersSolidColorHardPocket"), (IMP)ReturnYes, (BOOL (**)(id, SEL))NULL);
+        Override("NSScrollPocket", @selector(layout), (IMP)HookScrollPocketLayout, &gOrigScrollPocketLayout);
+    }
+    _dyld_register_func_for_add_image(OnImageAddedForGlass);
+    Override("NSWindow", sel_registerName("_prefersSolariumAppearance"), (IMP)ReturnNo, (BOOL (**)(id, SEL))NULL);
+    Override("NSAppearance", sel_registerName("_wantsSolarium"), (IMP)ReturnNo, (BOOL (**)(id, SEL))NULL);
+    Override("NSAppearance", sel_registerName("_wantsSolariumForWidget:"), (IMP)ReturnNo1, (BOOL (**)(id, SEL, id))NULL);
     Override("NSTableRowView", @selector(setSelected:), (IMP)HookRowSelected, &gOrigRowSelected);
     Override("NSTableRowView", @selector(layout), (IMP)HookRowLayout, &gOrigRowLayout);
     Override("NSSegmentItemView", sel_registerName("_preferredAppearanceForSegmentLabelView:"), (IMP)HookSegmentLabelAppearance, &gOrigSegmentLabelAppearance);
@@ -2113,8 +2831,10 @@ static void Install(void) {
     Override("NSTabViewItem", sel_registerName("interiorBackgroundStyle"), (IMP)HookTabStyle, &gOrigTabStyle);
     Override("NSTabViewItem", sel_registerName("_labelColor"), (IMP)HookTabLabelColor, &gOrigTabLabelColor);
 
-    Override("NSApplication", @selector(appearance), (IMP)AquaAppearance, (NSAppearance *(**)(id, SEL))NULL);
-    Override("NSApplication", @selector(effectiveAppearance), (IMP)AquaAppearance, (NSAppearance *(**)(id, SEL))NULL);
+    if (strcmp(getprogname(), "MenuBarAgent") != 0 && !IsControlCenterProcess() && !IsNotificationCenterProcess()) {
+        Override("NSApplication", @selector(appearance), (IMP)AquaAppearance, (NSAppearance *(**)(id, SEL))NULL);
+        Override("NSApplication", @selector(effectiveAppearance), (IMP)AquaAppearance, (NSAppearance *(**)(id, SEL))NULL);
+    }
     os_log(OS_LOG_DEFAULT, "Lioness: loaded into %{public}s", getprogname());
 }
 

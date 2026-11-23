@@ -112,4 +112,7 @@ while [ "$WAITED" -lt 300 ]; do
     sleep 3
     WAITED=$((WAITED + 3))
 done
+pkill -x MenuBarAgent >/dev/null 2>&1 || true
+pkill -x ControlCenter >/dev/null 2>&1 || true
+pkill -x NotificationCenter >/dev/null 2>&1 || true
 exit 0
