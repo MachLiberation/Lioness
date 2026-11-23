@@ -11,7 +11,8 @@ SETUP="$HOME_DIR/LionessSetup.sh"
 mkdir -p "$HOME_DIR/log"
 chown nobody:nobody "$HOME_DIR/log"
 chmod 755 "$HOME_DIR/log"
-touch "$HOME_DIR/log/setup.log"; chown root:wheel "$HOME_DIR/log/setup.log"
+touch "$HOME_DIR/log/setup.log" "$HOME_DIR/log/skylightaugmentord.log"
+chown root:wheel "$HOME_DIR/log/setup.log" "$HOME_DIR/log/skylightaugmentord.log"
 
 # Remove what 1.x installed. Files only: stopping those jobs under a running session can take the session down.
 # They end at the next restart.

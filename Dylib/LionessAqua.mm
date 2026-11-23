@@ -2577,31 +2577,96 @@ static void FindBarSelections(CALayer *layer, CALayer *barLayer, CGFloat barHeig
     }
 }
 
+static bool SkylightAugmentorIsActive(void) {
+    static bool active;
+    static CFAbsoluteTime checkedAt;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - checkedAt > 2.0) {
+        checkedAt = now;
+        active = access("/Library/Lioness/log/skylightaugmentord.ws", R_OK) == 0;
+    }
+    return active;
+}
+
+static NSString *const kBarAppleLayer = @"lioness.bar.apple";
+
+// Loads Mountain Lion's authentic 3D glossy Apple logos (0x4e2b normal, 0x4e2c pressed, 44x44 @ 2x)
+// directly from ml-root's SArtFile.bin.
+static CGImageRef LoadMLAppleLogo(bool pressed) {
+    static CGImageRef sNormal, sPressed;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *sart = [NSData dataWithContentsOfFile:@"/Library/Lioness/ml-root/System/Library/PrivateFrameworks/CoreUI.framework/Versions/A/Resources/SArtFile.bin"];
+        if (sart.length < 16) return;
+        const uint8_t *buf = (const uint8_t *)sart.bytes;
+        uint16_t ver = 0, cnt = 0; uint32_t dataOff = 0;
+        memcpy(&ver, buf, 2); memcpy(&cnt, buf + 2, 2); memcpy(&dataOff, buf + 4, 4);
+        if (ver != 2) return;
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        uint32_t ids[2] = { 0x4e2b, 0x4e2c };
+        CGImageRef *dst[2] = { &sNormal, &sPressed };
+        for (int k = 0; k < 2; k++) {
+            uint32_t idx = ids[k] - 0x4e20;
+            if (idx >= cnt || 8 + (idx + 1) * 4 > sart.length) continue;
+            uint32_t imgOff = 0; memcpy(&imgOff, buf + 8 + idx * 4, 4);
+            if (imgOff + 4 > sart.length) continue;
+            uint16_t ecnt = 0; memcpy(&ecnt, buf + imgOff + 2, 2);
+            for (uint16_t e = 0; e < ecnt; e++) {
+                size_t eo = imgOff + 4 + (size_t)e * 12;
+                if (eo + 12 > sart.length) break;
+                uint16_t w = 0, h = 0; uint32_t len = 0, rel = 0;
+                memcpy(&w, buf + eo, 2); memcpy(&h, buf + eo + 2, 2);
+                memcpy(&len, buf + eo + 4, 4); memcpy(&rel, buf + eo + 8, 4);
+                if (w == 44 && h == 44 && len == 44 * 44 * 4 && (size_t)dataOff + rel + len <= sart.length) {
+                    NSData *copy = [NSData dataWithBytes:buf + dataOff + rel length:len];
+                    CGDataProviderRef dp = CGDataProviderCreateWithCFData((CFDataRef)copy);
+                    *dst[k] = CGImageCreate(44, 44, 8, 32, 44 * 4, cs,
+                                            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+                                            dp, NULL, true, kCGRenderingIntentDefault);
+                    CGDataProviderRelease(dp);
+                    break;
+                }
+            }
+        }
+        CGColorSpaceRelease(cs);
+    });
+    return pressed ? sPressed : sNormal;
+}
+
 static bool DressMenuBarWindow(NSWindow *window) {
     NSView *hit = window.contentView, *frame = hit.superview;
     if (!frame.layer || !IsNamed(hit, "MenuBarHitTestingView")) return false;
     CGFloat height = window.frame.size.height;
     uint32_t scale = ScaleOf(@{}, window.backingScaleFactor);
+    bool wsAugmented = SkylightAugmentorIsActive();
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     // Its own layer, as the frame view paints over contents set on its layer.
+    // When skylightaugmentord is active, WindowServer itself renders the live-blurred Mountain Lion
+    // SArtFile.bin translucent bar + 1px bottom hairline + 8pt drop shadow behind this window.
     CALayer *bar = nil;
     for (CALayer *sub in frame.layer.sublayers) if ([sub.name isEqual:kBarLayer]) bar = sub;
-    if (!bar) {
-        bar = [CALayer layer];
-        bar.name = kBarLayer;
-        bar.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null };
-        [frame.layer insertSublayer:bar atIndex:0];
-    }
-    bar.frame = frame.layer.bounds;
-    static char barKey;
-    NSNumber *dressed = objc_getAssociatedObject(window, &barKey);
-    if (dressed.doubleValue != height * scale) {
-        CGImageRef art = CreateBarArt(@"kCUIWidgetMenuBar", @"normal", height, scale);
-        if (art) {
-            SetContents(bar, art, scale, CGRectMake(0.49, 0, 0.02, 1));
-            CGImageRelease(art);
-            objc_setAssociatedObject(window, &barKey, @(height * scale), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (wsAugmented) {
+        if (bar) bar.hidden = YES;
+        if (window.hasShadow) window.hasShadow = NO;
+    } else {
+        if (!bar) {
+            bar = [CALayer layer];
+            bar.name = kBarLayer;
+            bar.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null };
+            [frame.layer insertSublayer:bar atIndex:0];
+        }
+        bar.hidden = NO;
+        bar.frame = frame.layer.bounds;
+        static char barKey;
+        NSNumber *dressed = objc_getAssociatedObject(window, &barKey);
+        if (dressed.doubleValue != height * scale) {
+            CGImageRef art = CreateBarArt(@"kCUIWidgetMenuBar", @"normal", height, scale);
+            if (art) {
+                SetContents(bar, art, scale, CGRectMake(0.49, 0, 0.02, 1));
+                CGImageRelease(art);
+                objc_setAssociatedObject(window, &barKey, @(height * scale), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
         }
     }
     FindBarSelections(frame.layer, frame.layer, height, scale, 0);
@@ -2619,9 +2684,19 @@ static bool DressMenuBarWindow(NSWindow *window) {
         gOrigLayerRemove([gBarSelections objectForKey:selection], @selector(removeFromSuperlayer));
         [gBarSelections removeObjectForKey:selection];
     }
-    if (!window.hasShadow) window.hasShadow = YES;
+    if (!wsAugmented && !window.hasShadow) window.hasShadow = YES;
     bool barDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuBar", @"state": @"normal", @"is.flipped": @NO }, 64, (uint32_t)ceil(height));
     bool selectionDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuTitle", @"state": @"pressed", @"is.flipped": @NO }, 64, (uint32_t)ceil(height), barDark);
+    // Find the leftmost AppMenuItemView (the Apple menu logo) so we can give it Mountain Lion's
+    // authentic 3D glossy metallic Apple logo from ml-root SArtFile.bin (0x4e2b normal, 0x4e2c pressed).
+    NSView *appleView = nil;
+    CGFloat minX = 1e9;
+    for (NSView *view in hit.subviews) {
+        if (IsNamed(view, "AppMenuItemView") && view.frame.origin.x < minX && view.frame.origin.x < 60 && view.frame.size.width < 70) {
+            minX = view.frame.origin.x;
+            appleView = view;
+        }
+    }
     bool selecting = false;
     for (NSView *view in hit.subviews) {
         CALayer *title = nil;
@@ -2630,6 +2705,38 @@ static bool DressMenuBarWindow(NSWindow *window) {
         bool onDark = title ? selectionDark : barDark;
         // Titles draw black; remote status items draw white on dark wallpaper and black on light wallpaper.
         bool invert;
+        if (view == appleView) {
+            CGImageRef logo = LoadMLAppleLogo(title != nil);
+            if (logo && view.layer) {
+                // Hide macOS 27's flat black Apple glyph (sublayers, subviews, or direct layer contents).
+                for (NSView *sv in view.subviews) sv.alphaValue = 0;
+                CALayer *al = nil;
+                for (CALayer *sub in view.layer.sublayers) {
+                    if ([sub.name isEqual:kBarAppleLayer]) al = sub;
+                    else if (![sub.name hasPrefix:@"lioness."]) sub.hidden = YES;
+                }
+                if (view.layer.contents) view.layer.contents = nil;
+                if (!al) {
+                    al = [CALayer layer];
+                    al.name = kBarAppleLayer;
+                    al.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null, @"frame": NSNull.null };
+                    al.contentsGravity = kCAGravityResizeAspect;
+                    al.contentsScale = 2.0;
+                    al.zPosition = 50;
+                    [view.layer addSublayer:al];
+                }
+                CGRect vb = view.layer.bounds;
+                CGFloat sz = 21.0;
+                al.frame = CGRectMake(floor((vb.size.width - sz) * 0.5), floor((vb.size.height - sz) * 0.5), sz, sz);
+                al.contents = (id)logo;
+                al.hidden = NO;
+                // 0x4e2b / 0x4e2c already contain Mountain Lion's exact normal/pressed 3D shading.
+                view.layer.shadowOpacity = 0;
+                SetInverted(view.layer, false);
+                SetInverted(title, false);
+                continue;
+            }
+        }
         if (IsNamed(view, "AppMenuItemView")) {
             invert = onDark;
             view.layer.shadowColor = NSColor.whiteColor.CGColor;
@@ -2706,9 +2813,63 @@ static void HookStatusButtonTitle(NSButton *self, SEL _cmd, NSString *title) {
     }
 }
 
+// Keep ControlCenter & NotificationCenter aligned with skylightaugmentord's compact 24pt menu bar
+// even on notched displays where hardware safeAreaInsets.top is 38pt.
+static const CGFloat kCompactMenuBarHeight = 24.0;
+static NSEdgeInsets (*gOrigScreenSafeArea)(NSScreen *, SEL);
+static NSEdgeInsets HookScreenSafeArea(NSScreen *self, SEL _cmd) {
+    NSEdgeInsets r = gOrigScreenSafeArea(self, _cmd);
+    if (SkylightAugmentorIsActive() && r.top > kCompactMenuBarHeight) r.top = kCompactMenuBarHeight;
+    return r;
+}
+static NSRect (*gOrigScreenVisibleFrame)(NSScreen *, SEL);
+static NSRect HookScreenVisibleFrame(NSScreen *self, SEL _cmd) {
+    NSRect vf = gOrigScreenVisibleFrame(self, _cmd);
+    if (SkylightAugmentorIsActive()) {
+        NSRect f = self.frame;
+        CGFloat topGap = NSMaxY(f) - NSMaxY(vf);
+        if (topGap > kCompactMenuBarHeight && topGap <= 56.0) {
+            vf.size.height += (topGap - kCompactMenuBarHeight);
+        }
+    }
+    return vf;
+}
+static NSRect (*gOrigScreenAuxLeft)(NSScreen *, SEL);
+static NSRect HookScreenAuxLeft(NSScreen *self, SEL _cmd) {
+    NSRect r = gOrigScreenAuxLeft(self, _cmd);
+    if (SkylightAugmentorIsActive() && r.size.height > kCompactMenuBarHeight) {
+        r.origin.y = NSMaxY(self.frame) - kCompactMenuBarHeight;
+        r.size.height = kCompactMenuBarHeight;
+    }
+    return r;
+}
+static NSRect (*gOrigScreenAuxRight)(NSScreen *, SEL);
+static NSRect HookScreenAuxRight(NSScreen *self, SEL _cmd) {
+    NSRect r = gOrigScreenAuxRight(self, _cmd);
+    if (SkylightAugmentorIsActive() && r.size.height > kCompactMenuBarHeight) {
+        r.origin.y = NSMaxY(self.frame) - kCompactMenuBarHeight;
+        r.size.height = kCompactMenuBarHeight;
+    }
+    return r;
+}
+static CGFloat (*gOrigScreenRevealedMBH)(NSScreen *, SEL);
+static CGFloat HookScreenRevealedMBH(NSScreen *self, SEL _cmd) {
+    CGFloat h = gOrigScreenRevealedMBH(self, _cmd);
+    if (SkylightAugmentorIsActive() && h > kCompactMenuBarHeight) return kCompactMenuBarHeight;
+    return h;
+}
+
 static void InstallMenuBar(void) {
     Override("NSStatusBarButton", @selector(setTitle:), (IMP)HookStatusButtonTitle, &gOrigStatusButtonTitle);
-    if (strcmp(getprogname(), "MenuBarAgent")) return;
+    const char *prog = getprogname();
+    if (!strcmp(prog, "ControlCenter") || !strcmp(prog, "NotificationCenter")) {
+        Override("NSScreen", @selector(safeAreaInsets), (IMP)HookScreenSafeArea, &gOrigScreenSafeArea);
+        Override("NSScreen", @selector(visibleFrame), (IMP)HookScreenVisibleFrame, &gOrigScreenVisibleFrame);
+        Override("NSScreen", @selector(auxiliaryTopLeftArea), (IMP)HookScreenAuxLeft, &gOrigScreenAuxLeft);
+        Override("NSScreen", @selector(auxiliaryTopRightArea), (IMP)HookScreenAuxRight, &gOrigScreenAuxRight);
+        Override("NSScreen", sel_registerName("_revealedMenuBarHeight"), (IMP)HookScreenRevealedMBH, &gOrigScreenRevealedMBH);
+    }
+    if (strcmp(prog, "MenuBarAgent")) return;
     Override("CABackdropLayer", @selector(init), (IMP)HookBackdropInit, &gOrigBackdropInit);
     Override("CALayer", @selector(removeFromSuperlayer), (IMP)HookLayerRemove, &gOrigLayerRemove);
     Override("NSViewBackingLayer", @selector(addSublayer:), (IMP)HookBarAddSublayer, &gOrigBarAddSublayer);

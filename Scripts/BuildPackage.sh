@@ -13,19 +13,19 @@ PLUGINS="$BUILD/pkg-plugins"
 BUNDLE="$PLUGINS/LionessImage.bundle"
 OUT="$BUILD/Lioness-$VERSION.pkg"
 RENDERER="$ROOT/ml-root/usr/libexec/lioness/renderer"
-cmake --build "$BUILD" --target appkitd LionessAqua LionessRenderer
+cmake --build "$BUILD" --target appkitd skylightaugmentord LionessAqua LionessRenderer
 chmod -R u+w "$STAGE" 2>/dev/null || true
 rm -rf "${BUILD:?}/pkg-root" "${BUILD:?}/pkg-plugins" "${OUT:?}"
 mkdir -p "$HOME_STAGE/tweak" "$BUNDLE/Contents/MacOS"
 
-cp "$BUILD/appkitd" "$RENDERER" "$HOME_STAGE/"
+cp "$BUILD/appkitd" "$BUILD/skylightaugmentord" "$RENDERER" "$HOME_STAGE/"
 cp "$BUILD/libLionessAqua.dylib" "$HOME_STAGE/tweak/"
 cp "$ROOT/Package/LionessSetup.sh" "$ROOT/Package/Uninstall.sh" "$ROOT/Package/libLionessAqua.dylib.blacklist" \
-   "$ROOT/Package/com.lioness.appkitd.plist" "$ROOT/Package/com.lioness.setup.plist" "$HOME_STAGE/"
-codesign -f -s - "$HOME_STAGE/appkitd" "$HOME_STAGE/tweak/libLionessAqua.dylib"
+   "$ROOT/Package/com.lioness.appkitd.plist" "$ROOT/Package/com.lioness.skylightaugmentord.plist" "$ROOT/Package/com.lioness.setup.plist" "$HOME_STAGE/"
+codesign -f -s - "$HOME_STAGE/appkitd" "$HOME_STAGE/skylightaugmentord" "$HOME_STAGE/tweak/libLionessAqua.dylib"
 # The daemon runs as nobody, and everything it reads must be readable by it.
 chmod -R a+rX,go-w "$HOME_STAGE"
-chmod 755 "$HOME_STAGE/appkitd" "$HOME_STAGE/LionessSetup.sh" "$HOME_STAGE/Uninstall.sh"
+chmod 755 "$HOME_STAGE/appkitd" "$HOME_STAGE/skylightaugmentord" "$HOME_STAGE/LionessSetup.sh" "$HOME_STAGE/Uninstall.sh"
 chmod 755 "$ROOT/Package/Scripts/preinstall" "$ROOT/Package/Scripts/postinstall"
 find "$STAGE" -type f -exec xattr -c {} +   # or pkgbuild writes them out as ._ files
 # The page runs in Installer's plugin service, which is arm64e or x86_64.

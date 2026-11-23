@@ -156,12 +156,17 @@ activate() {   # The tweak and the daemon go on only now, so no app is ever inje
     tweaks=/private/var/ammonia/core/tweaks
     [ -d "$tweaks" ] || fail "Ammonia is not installed: $tweaks does not exist."
     launchctl bootout system/com.lioness.appkitd 2>/dev/null
+    launchctl bootout system/com.lioness.skylightaugmentord 2>/dev/null
     rm -f /private/var/ammonia/core/tweaks/.com.lioness.appkitd.token /private/var/ammonia/core/tweaks/libLionessAqua.dylib.whitelist /private/var/ammonia/core/tweaks/libLionessAqua.whitelist
     # New inodes, as running processes may have the old ones mapped.
     install_atomically "$HOME_DIR/tweak/libLionessAqua.dylib" "$tweaks/libLionessAqua.dylib" 755 || fail "could not install the tweak."
     install_atomically "$HOME_DIR/libLionessAqua.dylib.blacklist" "$tweaks/libLionessAqua.dylib.blacklist" 644 || fail "could not install the blacklist."
     install_atomically "$HOME_DIR/com.lioness.appkitd.plist" /Library/LaunchDaemons/com.lioness.appkitd.plist 644 || fail "could not install the daemon."
+    install_atomically "$HOME_DIR/com.lioness.skylightaugmentord.plist" /Library/LaunchDaemons/com.lioness.skylightaugmentord.plist 644 || fail "could not install skylightaugmentord."
+    launchctl enable system/com.lioness.appkitd 2>/dev/null || true
+    launchctl enable system/com.lioness.skylightaugmentord 2>/dev/null || true
     launchctl bootstrap system /Library/LaunchDaemons/com.lioness.appkitd.plist || fail "could not start com.lioness.appkitd."
+    launchctl bootstrap system /Library/LaunchDaemons/com.lioness.skylightaugmentord.plist || fail "could not start com.lioness.skylightaugmentord."
 }
 
 setup() {   # download | keep | image path

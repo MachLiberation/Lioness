@@ -30,6 +30,12 @@ add_executable(appkitd Daemon/Appkitd.cpp)
 target_link_libraries(appkitd PRIVATE LionessEngine)
 target_compile_options(appkitd PRIVATE -Wno-deprecated-declarations)
 
+add_executable(skylightaugmentord Daemon/SkylightAugmentord.cpp Daemon/SkylightPayload.c)
+set_target_properties(skylightaugmentord PROPERTIES OSX_ARCHITECTURES arm64e)
+set_source_files_properties(Daemon/SkylightPayload.c PROPERTIES COMPILE_OPTIONS "-fno-stack-protector;-fno-common;-O2;-fvisibility=hidden")
+target_compile_options(skylightaugmentord PRIVATE -Wno-deprecated-declarations)
+target_link_libraries(skylightaugmentord PRIVATE "-framework CoreFoundation" "-framework CoreGraphics" "-framework QuartzCore" "-lobjc")
+
 # The guest half: x86-64, linked against Mountain Lion's frameworks, installed inside ml-root where the engine finds it.
 set(LION_ROOT ${CMAKE_SOURCE_DIR}/ml-root)
 set(RENDERER ${LION_ROOT}/usr/libexec/lioness/renderer)
