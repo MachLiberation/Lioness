@@ -76,10 +76,16 @@
 //// Core Macros (For fine-tuned Use)
 ////////////////////////////////////////////////////////////////////////////////
 // returns the original implementation of the swizzled function or null or not found
-#define ZKOrig(TYPE, ...) ((TYPE (*)(id, SEL WRAP_LIST(__VA_ARGS__)))(ZKOriginalImplementation(self, _cmd, __PRETTY_FUNCTION__)))(self, _cmd, ##__VA_ARGS__)
+#define ZKOrig(TYPE, ...) ({ \
+    SEL _zk_sel = ZKSelectorFromInfo(__PRETTY_FUNCTION__, _cmd); \
+    ((TYPE (*)(id, SEL WRAP_LIST(__VA_ARGS__)))(ZKOriginalImplementation(self, _zk_sel, __PRETTY_FUNCTION__)))(self, _zk_sel, ##__VA_ARGS__); \
+})
 
 // returns the original implementation of the superclass of the object swizzled
-#define ZKSuper(TYPE, ...) ((TYPE (*)(id, SEL WRAP_LIST(__VA_ARGS__)))(ZKSuperImplementation(self, _cmd, __PRETTY_FUNCTION__)))(self, _cmd, ##__VA_ARGS__)
+#define ZKSuper(TYPE, ...) ({ \
+    SEL _zk_sel = ZKSelectorFromInfo(__PRETTY_FUNCTION__, _cmd); \
+    ((TYPE (*)(id, SEL WRAP_LIST(__VA_ARGS__)))(ZKSuperImplementation(self, _zk_sel, __PRETTY_FUNCTION__)))(self, _zk_sel, ##__VA_ARGS__); \
+})
 
 #define _ZKSwizzleInterfaceConditionally(CLASS_NAME, TARGET_CLASS, SUPERCLASS, GROUP, IMMEDIATELY) \
     @interface _$ ## CLASS_NAME : SUPERCLASS @end\
@@ -147,6 +153,10 @@ __BEGIN_DECLS
 // Make sure to cast this before you use it
 typedef id (*ZKIMP)(id, SEL, ...);
 
+// extracts the hook's declared selector from __PRETTY_FUNCTION__ so downstream
+// method_exchangeImplementations swizzlers (such as ViewBridge's swizzledStyleMask)
+// that invoke our hook with a renamed _cmd still resolve the original IMP cleanly.
+SEL ZKSelectorFromInfo(const char *info, SEL fallback);
 // returns a pointer to the instance variable "name" on the object
 void *ZKIvarPointer(id self, const char *name);
 // returns the original implementation of a method with selector "sel" of an object hooked by the methods below

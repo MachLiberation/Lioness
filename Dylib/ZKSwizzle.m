@@ -24,30 +24,42 @@ static SEL destinationSelectorForSelector(SEL cmd, Class dst) {
 }
 
 static Class classFromInfo(const char *info) {
-    NSUInteger bracket_index = -1;
-    for (NSUInteger i = 0; i < strlen(info); i++) {
-        if (info[i] == '[') {
-            bracket_index = i;
-            break;
-        }
-    }
-    bracket_index++;
-    
-    if (bracket_index == -1) {
+    if (!info) return NULL;
+    const char *lbr = strchr(info, '[');
+    if (!lbr) {
         [NSException raise:@"Failed to parse info" format:@"Couldn't find swizzle class for info: %s", info];
         return NULL;
     }
-    
-    char after_bracket[255];
-    memcpy(after_bracket, &info[bracket_index], strlen(info) - bracket_index - 1);
-    
-    for (NSUInteger i = 0; i < strlen(info); i++) {
-        if (after_bracket[i] == ' ') {
-            after_bracket[i] = '\0';
-        }
+    const char *start = lbr + 1;
+    const char *end = start;
+    while (*end && *end != ' ' && *end != '(' && *end != ']') end++;
+    size_t len = (size_t)(end - start);
+    if (len == 0 || len >= 255) {
+        [NSException raise:@"Failed to parse info" format:@"Invalid swizzle class in info: %s", info];
+        return NULL;
     }
-    
-    return objc_getClass(after_bracket);
+    char name[256];
+    memcpy(name, start, len);
+    name[len] = '\0';
+    return objc_getClass(name);
+}
+
+SEL ZKSelectorFromInfo(const char *info, SEL fallback) {
+    if (!info) return fallback;
+    const char *lbr = strchr(info, '[');
+    if (!lbr) return fallback;
+    const char *sp = strchr(lbr + 1, ' ');
+    if (!sp) return fallback;
+    const char *start = sp + 1;
+    const char *rbr = strchr(start, ']');
+    if (!rbr || rbr <= start) return fallback;
+    size_t len = (size_t)(rbr - start);
+    if (len >= 255) return fallback;
+    char selName[256];
+    memcpy(selName, start, len);
+    selName[len] = '\0';
+    SEL parsed = sel_registerName(selName);
+    return parsed ? parsed : fallback;
 }
 
 // takes __PRETTY_FUNCTION__ for info which gives the name of the swizzle source class
@@ -73,17 +85,22 @@ ZKIMP ZKOriginalImplementation(id self, SEL sel, const char *info) {
         return NULL;
     }
     
-    SEL destSel = destinationSelectorForSelector(sel, cls);
+    SEL effectiveSel = ZKSelectorFromInfo(info, sel);
+    SEL destSel = destinationSelectorForSelector(effectiveSel, cls);
     
-    Method method =  class_getInstanceMethod(dest, destSel);
+    Method method = class_getInstanceMethod(dest, destSel);
+    if (method == NULL && effectiveSel != sel) {
+        destSel = destinationSelectorForSelector(sel, cls);
+        method = class_getInstanceMethod(dest, destSel);
+    }
     
     if (method == NULL) {
         if (![NSStringFromClass(cls) isEqualToString:NSStringFromClass([self class])]) {
             // There is no implementation at this class level. Call the super implementation
-            return ZKSuperImplementation(self, sel, info);
+            return ZKSuperImplementation(self, effectiveSel, info);
         }
         
-        [NSException raise:@"Failed to retrieve method" format:@"Got null for the source class %@ with selector %@ (%@)", NSStringFromClass(cls), NSStringFromSelector(sel), NSStringFromSelector(destSel)];
+        [NSException raise:@"Failed to retrieve method" format:@"Got null for the source class %@ with selector %@ (%@)", NSStringFromClass(cls), NSStringFromSelector(effectiveSel), NSStringFromSelector(destSel)];
         return NULL;
     }
     
@@ -137,9 +154,13 @@ ZKIMP ZKSuperImplementation(id object, SEL sel, const char *info) {
         return NULL;
     }
     
-    Method method = class_getInstanceMethod(cls, sel);
+    SEL effectiveSel = ZKSelectorFromInfo(info, sel);
+    Method method = class_getInstanceMethod(cls, effectiveSel);
+    if (method == NULL && effectiveSel != sel) {
+        method = class_getInstanceMethod(cls, sel);
+    }
     if (method == NULL) {
-        [NSException raise:@"Failed to retrieve method" format:@"We could not find the super implementation for the class %@ and selector %@, are you sure it exists?", NSStringFromClass(cls), NSStringFromSelector(sel)];
+        [NSException raise:@"Failed to retrieve method" format:@"We could not find the super implementation for the class %@ and selector %@, are you sure it exists?", NSStringFromClass(cls), NSStringFromSelector(effectiveSel)];
         return NULL;
     }
     
