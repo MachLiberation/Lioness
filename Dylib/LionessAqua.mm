@@ -2687,18 +2687,30 @@ static bool DressMenuBarWindow(NSWindow *window) {
     if (!wsAugmented && !window.hasShadow) window.hasShadow = YES;
     bool barDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuBar", @"state": @"normal", @"is.flipped": @NO }, 64, (uint32_t)ceil(height));
     bool selectionDark = SurfaceIsDark(@{ @"widget": @"kCUIWidgetMenuTitle", @"state": @"pressed", @"is.flipped": @NO }, 64, (uint32_t)ceil(height), barDark);
-    // Find the leftmost AppMenuItemView (the Apple menu logo) so we can give it Mountain Lion's
+    // Collect all menu bar item views (both direct children of MenuBarHitTestingView and inside AppMenuItemContainerView).
+    NSMutableArray<NSView *> *itemViews = [NSMutableArray array];
+    for (NSView *view in hit.subviews) {
+        if (IsNamed(view, "AppMenuItemContainerView")) {
+            [itemViews addObjectsFromArray:view.subviews];
+        } else {
+            [itemViews addObject:view];
+        }
+    }
+    // Find the leftmost laid-out AppMenuItemView (the Apple menu logo) so we can give it Mountain Lion's
     // authentic 3D glossy metallic Apple logo from ml-root SArtFile.bin (0x4e2b normal, 0x4e2c pressed).
+    // Require non-zero laid-out size (>=12x12) so newly inserted 0x0 menu items on focus switch are NEVER mistaken for it!
     NSView *appleView = nil;
     CGFloat minX = 1e9;
-    for (NSView *view in hit.subviews) {
-        if (IsNamed(view, "AppMenuItemView") && view.frame.origin.x < minX && view.frame.origin.x < 60 && view.frame.size.width < 70) {
-            minX = view.frame.origin.x;
+    for (NSView *view in itemViews) {
+        NSRect f = view.frame;
+        if (IsNamed(view, "AppMenuItemView") && f.size.width >= 12.0 && f.size.height >= 12.0 &&
+            f.origin.x < minX && f.origin.x < 48.0 && f.size.width < 56.0) {
+            minX = f.origin.x;
             appleView = view;
         }
     }
     bool selecting = false;
-    for (NSView *view in hit.subviews) {
+    for (NSView *view in itemViews) {
         CALayer *title = nil;
         for (CALayer *sub in view.layer.sublayers) if ([sub.name isEqual:kBarTitleLayer]) title = sub;
         selecting |= title != nil;
@@ -2719,7 +2731,7 @@ static bool DressMenuBarWindow(NSWindow *window) {
                 if (!al) {
                     al = [CALayer layer];
                     al.name = kBarAppleLayer;
-                    al.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null, @"frame": NSNull.null };
+                    al.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null, @"frame": NSNull.null, @"hidden": NSNull.null };
                     al.contentsGravity = kCAGravityResizeAspect;
                     al.contentsScale = 2.0;
                     al.zPosition = 50;
@@ -2738,6 +2750,14 @@ static bool DressMenuBarWindow(NSWindow *window) {
             }
         }
         if (IsNamed(view, "AppMenuItemView")) {
+            // If a reused AppMenuItemView ever held an Apple logo layer, cleanly restore it for normal menu titles.
+            CALayer *staleApple = nil;
+            for (CALayer *sub in view.layer.sublayers) if ([sub.name isEqual:kBarAppleLayer]) { staleApple = sub; break; }
+            if (staleApple) {
+                [staleApple removeFromSuperlayer];
+                for (NSView *sv in view.subviews) sv.alphaValue = 1;
+                for (CALayer *sub in view.layer.sublayers) if (![sub.name hasPrefix:@"lioness."]) sub.hidden = NO;
+            }
             invert = onDark;
             view.layer.shadowColor = NSColor.whiteColor.CGColor;
             view.layer.shadowOpacity = onDark ? 0 : 0.55f;
@@ -2842,6 +2862,32 @@ static void HookBarLayerDisplay(CALayer *self, SEL _cmd) {
         }
     }
 }
+static void (*gOrigBarViewLayout)(NSView *, SEL);
+static void HookBarViewLayout(NSView *self, SEL _cmd) {
+    gOrigBarViewLayout(self, _cmd);
+    if (!gDressingBar && (IsNamed(self, "MenuBarHitTestingView") || IsNamed(self, "AppMenuItemContainerView") || IsNamed(self, "AppMenuItemView"))) {
+        DressMenuBarWindowImmediate(self.window);
+    }
+}
+static void (*gOrigBarViewAppearance)(NSView *, SEL);
+static void HookBarViewAppearance(NSView *self, SEL _cmd) {
+    gOrigBarViewAppearance(self, _cmd);
+    if (!gDressingBar && (IsNamed(self, "MenuBarHitTestingView") || IsNamed(self, "SceneHostDisplayItemContainerView"))) {
+        DressMenuBarWindowImmediate(self.window);
+    }
+}
+static void (*gOrigBarWindowSetAppearance)(NSWindow *, SEL, NSAppearance *);
+static void HookBarWindowSetAppearance(NSWindow *self, SEL _cmd, NSAppearance *appearance) {
+    gOrigBarWindowSetAppearance(self, _cmd, appearance);
+    if (!gDressingBar && IsNamed(self, "DisplayItemAppKitWindow")) {
+        DressMenuBarWindowImmediate(self);
+    }
+}
+static void (*gOrigBarWindowSetHasShadow)(NSWindow *, SEL, BOOL);
+static void HookBarWindowSetHasShadow(NSWindow *self, SEL _cmd, BOOL hasShadow) {
+    if (hasShadow && SkylightAugmentorIsActive() && IsNamed(self, "DisplayItemAppKitWindow")) hasShadow = NO;
+    gOrigBarWindowSetHasShadow(self, _cmd, hasShadow);
+}
 
 // Match the status item window's appearance so MenuBarAgent's inversion logic stays consistent on both light and dark wallpapers.
 static void (*gOrigStatusButtonTitle)(NSButton *, SEL, NSString *);
@@ -2918,6 +2964,10 @@ static void InstallMenuBar(void) {
     Override("NSViewBackingLayer", @selector(insertSublayer:atIndex:), (IMP)HookBarInsertSublayer, &gOrigBarInsertSublayer);
     Override("NSViewBackingLayer", @selector(setSublayers:), (IMP)HookBarSetSublayers, &gOrigBarSetSublayers);
     Override("NSViewBackingLayer", @selector(display), (IMP)HookBarLayerDisplay, &gOrigBarLayerDisplay);
+    Override("NSView", @selector(layout), (IMP)HookBarViewLayout, &gOrigBarViewLayout);
+    Override("NSView", @selector(viewDidChangeEffectiveAppearance), (IMP)HookBarViewAppearance, &gOrigBarViewAppearance);
+    Override("NSWindow", @selector(setAppearance:), (IMP)HookBarWindowSetAppearance, &gOrigBarWindowSetAppearance);
+    Override("NSWindow", @selector(setHasShadow:), (IMP)HookBarWindowSetHasShadow, &gOrigBarWindowSetHasShadow);
     // The agent's windows come and go with Spaces and displays, and say nothing to AppKit that could be hooked.
     static dispatch_source_t timer;
     timer = MainQueueTimer(0.25, ^{ DressMenuBars(); [CATransaction flush]; });

@@ -110,6 +110,16 @@ static inline float CallRetFloat(uint64_t fn, uint64_t a0, uint64_t a1) {
     return s0;
 }
 
+static inline void CallFloatArg(uint64_t fn, uint64_t a0, uint64_t a1, float f) {
+    register uint64_t x16 __asm__("x16") = fn;
+    register uint64_t x0 __asm__("x0") = a0;
+    register uint64_t x1 __asm__("x1") = a1;
+    register float s0 __asm__("s0") = f;
+    __asm__ volatile("blr x16" : "+r"(x0), "+r"(x1), "+w"(s0) : "r"(x16)
+                     : "x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x17","x30","memory","cc",
+                       "v1","v2","v3","v4","v5","v6","v7","v16","v17","v18","v19","v20","v21","v22","v23","v24","v25","v26","v27","v28","v29","v30","v31");
+}
+
 static inline void CallShadowProps(uint64_t fn, float density, void *win) {
     register uint64_t x16 __asm__("x16") = fn;
     register float s0 __asm__("s0") = density;
@@ -285,6 +295,7 @@ static void EnsureInitialized(WSRemoteState *st) {
         st->sel_isHidden               = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_isHidden);
         st->sel_setHidden              = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_setHidden);
         st->sel_opacity                = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_opacity);
+        st->sel_setOpacity             = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_setOpacity);
         st->sel_bounds                 = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_bounds);
         st->sel_setFrame               = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_setFrame);
         st->sel_setName                = Call1(st->fn_sel_registerName, (uint64_t)st->ascii_setName);
@@ -451,10 +462,20 @@ void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa
     }
 
     // Hide Solarium's heavy 360px desktop_capture / enhancement / AX backstop so our live CABackdropLayer shines.
+    // Also zero opacity so any async PKGCoreUITransaction callback on backstopAX can never flash stock material.
     if (!isFullScreen) {
-        if (desktopCap) Call3(st->fn_objc_msgSend, (uint64_t)desktopCap, (uint64_t)st->sel_setHidden, 1);
-        if (desktopEnh) Call3(st->fn_objc_msgSend, (uint64_t)desktopEnh, (uint64_t)st->sel_setHidden, 1);
-        if (backstopAX) Call3(st->fn_objc_msgSend, (uint64_t)backstopAX, (uint64_t)st->sel_setHidden, 1);
+        if (desktopCap) {
+            Call3(st->fn_objc_msgSend, (uint64_t)desktopCap, (uint64_t)st->sel_setHidden, 1);
+            if (st->sel_setOpacity) CallFloatArg(st->fn_objc_msgSend, (uint64_t)desktopCap, (uint64_t)st->sel_setOpacity, 0.0f);
+        }
+        if (desktopEnh) {
+            Call3(st->fn_objc_msgSend, (uint64_t)desktopEnh, (uint64_t)st->sel_setHidden, 1);
+            if (st->sel_setOpacity) CallFloatArg(st->fn_objc_msgSend, (uint64_t)desktopEnh, (uint64_t)st->sel_setOpacity, 0.0f);
+        }
+        if (backstopAX) {
+            Call3(st->fn_objc_msgSend, (uint64_t)backstopAX, (uint64_t)st->sel_setHidden, 1);
+            if (st->sel_setOpacity) CallFloatArg(st->fn_objc_msgSend, (uint64_t)backstopAX, (uint64_t)st->sel_setOpacity, 0.0f);
+        }
     }
 
     // Locate our layers on menubar.root (clip container -> backdrop, gloss, hairline).
@@ -603,14 +624,22 @@ void LionessStyleMenuBar(void *ctx, void *cgx_window, int fromReshape, int isQfa
         Call3(st->fn_objc_msgSend, (uint64_t)hairline, (uint64_t)st->sel_setHidden, (uint64_t)isFullScreen);
     }
 
+    // Commit our outer transaction atomically WITHOUT premature [CATransaction flush]:
+    // update_layers runs mid-way through PKGRebuildMenuBarsIfNeeded before update_per_connection_image
+    // finishes attaching the newly focused app's MenuBarAgent CALayerHost, so flushing early flashes a frame.
     Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_commit);
-    if (st->sel_flush) {
-        Call2(st->fn_objc_msgSend, (uint64_t)st->cls_CATransaction, (uint64_t)st->sel_flush);
-    }
 
-    // Apply Mountain Lion's iconic menu bar drop shadow (0.50 density, 8.0pt radius, 0.0 rim) when not fullscreen.
-    if (!isFullScreen && cgx_window && st->fn_set_shadow_properties) {
-        CallShadowProps(st->fn_set_shadow_properties, st->shadowDensity, cgx_window);
+    // Apply Mountain Lion's iconic menu bar drop shadow (0.75 density, 16.0pt radius, 0.0 rim) when not fullscreen.
+    // Only re-apply when the menu bar CGXWindow changes, leaving fullscreen, or on config refresh so focus
+    // switches don't redundantly invalidate the window shadow frame.
+    if (isFullScreen) {
+        st->lastShadowFullScreen = 1;
+    } else if (cgx_window && st->fn_set_shadow_properties) {
+        if (cgx_window != st->lastShadowWindow || st->lastShadowFullScreen || needsRefresh) {
+            CallShadowProps(st->fn_set_shadow_properties, st->shadowDensity, cgx_window);
+            st->lastShadowWindow = cgx_window;
+            st->lastShadowFullScreen = 0;
+        }
     }
 
     st->lastFlags = (uint32_t)((isFullScreen ? 1 : 0) |

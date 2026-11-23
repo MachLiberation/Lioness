@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #define WS_STATE_MAGIC     0x4C494F4E534B5931ULL  // "LIONSKY1"
-#define WS_STATE_VERSION   7U
+#define WS_STATE_VERSION   9U
 #define WS_PAYLOAD_PAGE_SZ 0x4000U                // 16 KB Apple Silicon page
 #define WS_BAR_W_2X        2U
 #define WS_BAR_H_2X        42U                    // Pure 42 px SArtFile 0x4e50+0x4e8d gradient (hairline is separate 1pt layer)
@@ -95,6 +95,7 @@ typedef struct __attribute__((aligned(16))) WSRemoteState {
     void *sel_isHidden;
     void *sel_setHidden;
     void *sel_opacity;
+    void *sel_setOpacity;
     void *sel_bounds;
     void *sel_setFrame;
     void *sel_setName;
@@ -126,6 +127,10 @@ typedef struct __attribute__((aligned(16))) WSRemoteState {
     double zBackdrop;
     double zGloss;
     double zHairline;
+
+    void *lastShadowWindow;
+    uint32_t lastShadowFullScreen;
+    uint32_t _pad1;
 
     void *cachedBarImage;       // CGImageRef (2x42 premultiplied BGRA8888 from ml-root SArtFile.bin)
     void *cachedHairlineImage;  // CGImageRef (2x2 premultiplied rgba(0,0,0,0.45))
@@ -165,6 +170,7 @@ typedef struct __attribute__((aligned(16))) WSRemoteState {
     char ascii_isHidden[16];
     char ascii_setHidden[16];
     char ascii_opacity[16];
+    char ascii_setOpacity[16];
     char ascii_bounds[16];
     char ascii_setFrame[16];
     char ascii_setName[16];

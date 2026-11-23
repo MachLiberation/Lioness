@@ -143,9 +143,13 @@ struct SkyLightTargets {
     uintptr_t sol_configure;
     uintptr_t sol_update;
     uintptr_t sol_reshape;
+    uintptr_t sol_animate_magic_pocket;
+    uintptr_t sol_wants_desktop_capture;
     uintptr_t qfa_configure;
     uintptr_t qfa_update;
     uintptr_t qfa_reshape;
+    uintptr_t qfa_animate_magic_pocket;
+    uintptr_t qfa_wants_desktop_capture;
     uintptr_t underbelly_new;
     uintptr_t underbelly_update;
     uintptr_t underbelly_cleanup;
@@ -156,6 +160,8 @@ struct SkyLightTargets {
     uintptr_t disp_menubar_height;
     uintptr_t pkg_menubar_height;
     uintptr_t pkg_menubar_bounds;
+    uintptr_t pkg_set_needs_rebuild;
+    uintptr_t menu_bar_bounds_space;
     uintptr_t eval_display_parts;
     uintptr_t encode_display;
     uintptr_t pkg_display_ctor;
@@ -245,9 +251,13 @@ static bool ResolveSkyLightTargets(SkyLightTargets *out) {
         if (!strcmp(s, "__ZN22SolariumMenuBarContext16configure_layersEv")) out->sol_configure = addr;
         else if (!strcmp(s, "__ZN22SolariumMenuBarContext13update_layersEP19PKGManagedMenuSpacejP9CGXWindowbbbbbbRK6CGRectS6_")) out->sol_update = addr;
         else if (!strcmp(s, "__ZN22SolariumMenuBarContext14reshape_layersE6CGRectfjbdP19PKGManagedMenuSpace")) out->sol_reshape = addr;
+        else if (!strcmp(s, "__ZN22SolariumMenuBarContext20animate_magic_pocketEb")) out->sol_animate_magic_pocket = addr;
+        else if (!strcmp(s, "__ZNK22SolariumMenuBarContext21wants_desktop_captureEv")) out->sol_wants_desktop_capture = addr;
         else if (!strcmp(s, "__ZN31LiveActivitiesQFAMenuBarContext16configure_layersEv")) out->qfa_configure = addr;
         else if (!strcmp(s, "__ZN31LiveActivitiesQFAMenuBarContext13update_layersEP19PKGManagedMenuSpacejP9CGXWindowbbbbbbRK6CGRectS6_")) out->qfa_update = addr;
         else if (!strcmp(s, "__ZN31LiveActivitiesQFAMenuBarContext14reshape_layersE6CGRectfjbdP19PKGManagedMenuSpace")) out->qfa_reshape = addr;
+        else if (!strcmp(s, "__ZN31LiveActivitiesQFAMenuBarContext20animate_magic_pocketEb")) out->qfa_animate_magic_pocket = addr;
+        else if (!strcmp(s, "__ZNK31LiveActivitiesQFAMenuBarContext21wants_desktop_captureEv")) out->qfa_wants_desktop_capture = addr;
         else if (!strcmp(s, "__ZN10Underbelly14new_underbellyEP19PKGManagedMenuSpace")) out->underbelly_new = addr;
         else if (!strcmp(s, "__ZN10Underbelly6updateERK20AdjustmentProperties")) out->underbelly_update = addr;
         else if (!strcmp(s, "__ZN10Underbelly7cleanupEv")) out->underbelly_cleanup = addr;
@@ -258,6 +268,8 @@ static bool ResolveSkyLightTargets(SkyLightTargets *out) {
         else if (!strcmp(s, "_WSDisplayGetMenubarHeight")) out->disp_menubar_height = addr;
         else if (!strcmp(s, "_PKGManagedMenuSpaceGetMenuBarHeight")) out->pkg_menubar_height = addr;
         else if (!strcmp(s, "_WSPackagesGetMenuBarBoundsForSpace")) out->pkg_menubar_bounds = addr;
+        else if (!strcmp(s, "_PKGManagedMenuSpaceSetNeedsMenuBarRebuildType")) out->pkg_set_needs_rebuild = addr;
+        else if (!strcmp(s, "__ZL25menu_bar_bounds_for_spaceP19PKGManagedMenuSpace")) out->menu_bar_bounds_space = addr;
         else if (!strcmp(s, "__ZN2WS8Displays7Display22evaluate_display_partsEv")) out->eval_display_parts = addr;
         else if (!strcmp(s, "__ZN2WS8Displays11CAWSManager14encode_displayER10CGSEncoderPKNS0_11SLCADisplayE")) out->encode_display = addr;
         else if (!strcmp(s, "__ZN10PKGDisplayC2ERKN12_GLOBAL__N_116WSDisplayWrapperE")) out->pkg_display_ctor = addr;
@@ -460,6 +472,7 @@ static void InitRemoteStateStrings(WSRemoteState *st) {
     S(ascii_isHidden,               "isHidden");
     S(ascii_setHidden,              "setHidden:");
     S(ascii_opacity,                "opacity");
+    S(ascii_setOpacity,             "setOpacity:");
     S(ascii_bounds,                 "bounds");
     S(ascii_setFrame,               "setFrame:");
     S(ascii_setName,                "setName:");
@@ -593,8 +606,12 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
 
     uint64_t remoteSolUpd   = t.sol_update ? ((uint64_t)t.sol_update + (uint64_t)delta) : 0;
     uint64_t remoteSolRsh   = t.sol_reshape ? ((uint64_t)t.sol_reshape + (uint64_t)delta) : 0;
+    uint64_t remoteSolMagic = t.sol_animate_magic_pocket ? ((uint64_t)t.sol_animate_magic_pocket + (uint64_t)delta) : 0;
+    uint64_t remoteSolCap   = t.sol_wants_desktop_capture ? ((uint64_t)t.sol_wants_desktop_capture + (uint64_t)delta) : 0;
     uint64_t remoteQfaUpd   = t.qfa_update ? ((uint64_t)t.qfa_update + (uint64_t)delta) : 0;
     uint64_t remoteQfaRsh   = t.qfa_reshape ? ((uint64_t)t.qfa_reshape + (uint64_t)delta) : 0;
+    uint64_t remoteQfaMagic = t.qfa_animate_magic_pocket ? ((uint64_t)t.qfa_animate_magic_pocket + (uint64_t)delta) : 0;
+    uint64_t remoteQfaCap   = t.qfa_wants_desktop_capture ? ((uint64_t)t.qfa_wants_desktop_capture + (uint64_t)delta) : 0;
     uint64_t remoteUBNew    = t.underbelly_new ? ((uint64_t)t.underbelly_new + (uint64_t)delta) : 0;
     uint64_t remoteUBUpd    = t.underbelly_update ? ((uint64_t)t.underbelly_update + (uint64_t)delta) : 0;
     uint64_t remoteUBClean  = t.underbelly_cleanup ? ((uint64_t)t.underbelly_cleanup + (uint64_t)delta) : 0;
@@ -605,6 +622,8 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
     uint64_t remoteDispH    = t.disp_menubar_height ? ((uint64_t)t.disp_menubar_height + (uint64_t)delta) : 0;
     uint64_t remotePkgH     = t.pkg_menubar_height ? ((uint64_t)t.pkg_menubar_height + (uint64_t)delta) : 0;
     uint64_t remotePkgB     = t.pkg_menubar_bounds ? ((uint64_t)t.pkg_menubar_bounds + (uint64_t)delta) : 0;
+    uint64_t remotePkgReb   = t.pkg_set_needs_rebuild ? ((uint64_t)t.pkg_set_needs_rebuild + (uint64_t)delta) : 0;
+    uint64_t remoteMBBounds = t.menu_bar_bounds_space ? ((uint64_t)t.menu_bar_bounds_space + (uint64_t)delta) : 0;
     uint64_t remoteEvalDP   = t.eval_display_parts ? ((uint64_t)t.eval_display_parts + (uint64_t)delta) : 0;
     uint64_t remoteEncDisp  = t.encode_display ? ((uint64_t)t.encode_display + (uint64_t)delta) : 0;
     uint64_t remotePkgDispC = t.pkg_display_ctor ? ((uint64_t)t.pkg_display_ctor + (uint64_t)delta) : 0;
@@ -743,10 +762,10 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
         size_t len;
         bool required;
     };
-    PatchOp ops[24];
+    PatchOp ops[32];
     size_t nOps = 0;
     auto addOp = [&](uint64_t addr, const void *src, size_t len, bool required) {
-        if (nOps < 24 && len <= 16) {
+        if (nOps < 32 && len <= 16) {
             ops[nOps].addr = addr;
             memcpy(ops[nOps].bytes, src, len);
             ops[nOps].len = len;
@@ -778,6 +797,15 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
             }
             addOp(remoteUBUpd, &insn, sizeof(insn), false);
         }
+
+        // 1b. Disable macOS 26/27 magic-pocket 300ms opacity/shadow animation (flashes shadow density 0<->0.3 on focus switch)
+        // and disable async desktop capture (commits menubar.desktop_capture in a separate out-of-band transaction).
+        uint32_t retOnly = 0xd65f03c0U; // ret
+        uint32_t retZero[2] = { 0x52800000U /* mov w0, #0 */, 0xd65f03c0U /* ret */ };
+        if (remoteQfaMagic) addOp(remoteQfaMagic, &retOnly, sizeof(retOnly), false);
+        if (remoteSolMagic) addOp(remoteSolMagic, &retOnly, sizeof(retOnly), false);
+        if (remoteQfaCap)   addOp(remoteQfaCap,   retZero,  sizeof(retZero), false);
+        if (remoteSolCap)   addOp(remoteSolCap,   retZero,  sizeof(retZero), false);
 
         // 2. Patch set_shadow_properties: radius -> 16.0f (deep Mountain Lion shadow below ClipTop), rimDensity -> 0.0f.
         if (remoteSetShad) {
@@ -862,6 +890,35 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
                 }
             }
         }
+        // CRITICAL: PKGManagedMenuSpaceSetNeedsMenuBarRebuildType compares current Menubar CGXWindow
+        // height (24pt) against raw [PKGDisplay+0x28] (43pt on notched displays created at boot).
+        // Without patching this comparison to 24.0, WindowServer destroys & recreates the entire Menubar
+        // window on EVERY focus switch, leaving 0 Menubar windows on screen for ~26ms!
+        if (remotePkgReb) {
+            uint32_t insns[140] = {};
+            if (mach_vm_read_overwrite(task, remotePkgReb, sizeof(insns), (mach_vm_address_t)insns, &got) == KERN_SUCCESS) {
+                for (int k = 0; k < 138; k++) {
+                    if (insns[k] == 0xbd402800U && insns[k + 1] == 0x7e61d808U) { // ldr s0, [x0, #0x28]; ucvtf d8, d0
+                        uint32_t fmov24[2] = { 0x1e671008U /* fmov d8, #24.0 */, 0xd503201fU /* nop */ };
+                        addOp(remotePkgReb + (uint64_t)k * 4, fmov24, sizeof(fmov24), false);
+                        break;
+                    }
+                }
+            }
+        }
+        // Also patch menu_bar_bounds_for_space's two raw [PKGDisplay+0x28] loads to 24pt so new/repositioned
+        // menu bar windows are always created directly at 24pt with zero height mismatch.
+        if (remoteMBBounds) {
+            uint32_t insns[72] = {};
+            if (mach_vm_read_overwrite(task, remoteMBBounds, sizeof(insns), (mach_vm_address_t)insns, &got) == KERN_SUCCESS) {
+                for (int k = 0; k < 72; k++) {
+                    if (insns[k] == 0xb9402816U) { // ldr w22, [x0, #0x28]
+                        uint32_t mov24 = 0x52800316U; // mov w22, #24
+                        addOp(remoteMBBounds + (uint64_t)k * 4, &mov24, 4, false);
+                    }
+                }
+            }
+        }
         // Propagate 24pt height into CGSDisplaySystemState (for ControlCenter, NSScreen, and all apps).
         if (remoteEncDisp) {
             uint32_t insns[64] = {};
@@ -903,7 +960,7 @@ static bool AugmentTask(mach_port_t task, pid_t pid, const SkyLightTargets &t,
         }
     }
 
-    PatchRange ranges[24];
+    PatchRange ranges[32];
     for (size_t i = 0; i < nOps; i++) {
         ranges[i] = { ops[i].addr, ops[i].addr + ops[i].len };
     }
@@ -1065,9 +1122,10 @@ static int RunSelfTestTarget(int rdFd, int wrFd) {
     typedef void (*RshFn)(void *, CGRect, float, uint32_t, bool, double, void *);
     UpdFn volatile upd = MockUpdateLayers;
     RshFn volatile rsh = MockReshapeLayers;
-    int dummyWin = 42;
-    upd(&ctx, NULL, 1, &dummyWin, 0, 0, 0, 0, 0, 0, NULL, NULL);
-    upd(&ctx, NULL, 1, &dummyWin, 0, 0, 0, 0, 0, 0, NULL, NULL);
+    int dummyWin1 = 42, dummyWin2 = 43;
+    upd(&ctx, NULL, 1, &dummyWin1, 0, 0, 0, 0, 0, 0, NULL, NULL);
+    upd(&ctx, NULL, 1, &dummyWin1, 0, 0, 0, 0, 0, 0, NULL, NULL); // same window: must not redundantly re-invalidate shadow
+    upd(&ctx, NULL, 1, &dummyWin2, 0, 0, 0, 0, 0, 0, NULL, NULL); // new window: must apply shadow
     ((void (*)(id, SEL, CGRect))objc_msgSend)(root, selSetFrame, CGRectMake(0, 0, 1728, 22));
     rsh(&ctx, CGRectMake(0, 0, 1728, 22), 2.0f, 1, false, 0.0, NULL);
 
@@ -1102,7 +1160,7 @@ static int RunSelfTestTarget(int rdFd, int wrFd) {
     };
     (void)write(wrFd, res, sizeof(res));
     return (hasBackdrop && hasGloss && auxHidden && gMockShadowCalled == 2 &&
-            res[4] == 75 && gMockUpdateCalled == 2 && gMockReshapeCalled == 1) ? 0 : 3;
+            res[4] == 75 && gMockUpdateCalled == 3 && gMockReshapeCalled == 1) ? 0 : 3;
 }
 
 static int RunSelfTest(const char *selfExe, const char *mlRoot) {
@@ -1116,9 +1174,12 @@ static int RunSelfTest(const char *selfExe, const char *mlRoot) {
         fprintf(stderr, "selftest: failed to resolve SkyLight symbols\n");
         return 1;
     }
-    printf("selftest: resolved SkyLight targets: sol=%#lx(root=0x%x) qfa=%#lx(root=0x%x) ub_clean=%#lx\n",
+    printf("selftest: resolved SkyLight targets: sol=%#lx(root=0x%x magic=%#lx cap=%#lx) qfa=%#lx(root=0x%x magic=%#lx cap=%#lx) reb=%#lx mbb=%#lx ub_clean=%#lx\n",
            (unsigned long)realTargets.sol_update, realTargets.solOffsets.off_root,
+           (unsigned long)realTargets.sol_animate_magic_pocket, (unsigned long)realTargets.sol_wants_desktop_capture,
            (unsigned long)realTargets.qfa_update, realTargets.qfaOffsets.off_root,
+           (unsigned long)realTargets.qfa_animate_magic_pocket, (unsigned long)realTargets.qfa_wants_desktop_capture,
+           (unsigned long)realTargets.pkg_set_needs_rebuild, (unsigned long)realTargets.menu_bar_bounds_space,
            (unsigned long)realTargets.underbelly_cleanup);
 
     int p2c[2], c2p[2];
