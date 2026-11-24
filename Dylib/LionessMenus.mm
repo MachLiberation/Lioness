@@ -941,6 +941,19 @@ static void CleanUpMenuBarTracking(id impl) {
     }
 }
 
+static void HighlightMenuBarItem(id impl, NSInteger idx, BOOL unhighlightFirst) {
+    if (unhighlightFirst) {
+        SEL unhiSel = NSSelectorFromString(@"unhighlightItemIfNeeded");
+        if ([impl respondsToSelector:unhiSel]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(impl, unhiSel); } @catch (NSException *ex) { (void)ex; }
+        }
+    }
+    SEL hiSel = NSSelectorFromString(@"highlightItemAtIndex:");
+    if ([impl respondsToSelector:hiSel]) {
+        @try { ((void (*)(id, SEL, NSInteger))objc_msgSend)(impl, hiSel, idx); } @catch (NSException *ex) { (void)ex; }
+    }
+}
+
 static BOOL PresentMenuBarDropdown(id impl, NSInteger startIdx) {
     if (tlInLionessMenu > 0) return NO;
     if (!LionessMenuServerIsReachable()) return NO;
@@ -964,6 +977,8 @@ static BOOL PresentMenuBarDropdown(id impl, NSInteger startIdx) {
         NSMutableDictionary<NSNumber *, NSMenu *> *ownerMap = [NSMutableDictionary dictionary];
         NSArray<NSDictionary *> *items = SerializeMenuItems(sub, 0, &nextId, itemMap, ownerMap);
         if (items.count == 0) break;
+
+        if (hops == 0) HighlightMenuBarItem(impl, curIdx, NO);
 
         NSMutableDictionary *req = [NSMutableDictionary dictionary];
         req[@"style"] = @"menubar";
@@ -992,14 +1007,7 @@ static BOOL PresentMenuBarDropdown(id impl, NSInteger startIdx) {
             if (nextBarIdx != curIdx && MenuBarSubmenu(barMenu, nextBarIdx)) {
                 curIdx = nextBarIdx;
                 // Unlight the title being left first, or two titles stay lit.
-                SEL unhiSel = NSSelectorFromString(@"unhighlightItemIfNeeded");
-                if ([impl respondsToSelector:unhiSel]) {
-                    @try { ((void (*)(id, SEL))objc_msgSend)(impl, unhiSel); } @catch (NSException *ex) { (void)ex; }
-                }
-                SEL hiSel = NSSelectorFromString(@"highlightItemAtIndex:");
-                if ([impl respondsToSelector:hiSel]) {
-                    @try { ((void (*)(id, SEL, NSInteger))objc_msgSend)(impl, hiSel, curIdx); } @catch (NSException *ex) { (void)ex; }
-                }
+                HighlightMenuBarItem(impl, curIdx, YES);
                 continue;
             }
             break;

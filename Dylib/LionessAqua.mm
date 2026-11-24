@@ -2516,11 +2516,26 @@ static bool LooksLikeBarSelection(CALayer *layer) {
 // beside it at its final size, and leaves when it does.
 static NSMapTable *gBarSelections;   // selection -> Lion's layer
 
+static void UpdateBarSelectionFrame(CALayer *title, CALayer *selection, CALayer *parent, CALayer *barLayer) {
+    CGRect bar = [barLayer convertRect:barLayer.bounds toLayer:parent];
+    id owner = parent.delegate;
+    // The agent's own selection runs 14 points past each side of a title. A status item's container already has its margins.
+    CGFloat x = 0, width = parent.bounds.size.width;
+    if (IsNamed(owner, "AppMenuItemView")) { x = -14; width += 28; }
+    else if (!IsNamed(owner, "SceneHostDisplayItemContainerView")) { x = selection.frame.origin.x; width = selection.frame.size.width; }
+    title.frame = CGRectMake(x, bar.origin.y, width, bar.size.height);
+}
+
 static void DressBarSelection(CALayer *selection, CALayer *barLayer, CGFloat barHeight, uint32_t scale) {
     if (!gBarSelections) gBarSelections = [[NSMapTable weakToStrongObjectsMapTable] retain];
     selection.hidden = YES;
     CALayer *parent = selection.superlayer;
-    if (!parent || [gBarSelections objectForKey:selection]) return;
+    if (!parent) return;
+    CALayer *existing = [gBarSelections objectForKey:selection];
+    if (existing) {
+        UpdateBarSelectionFrame(existing, selection, parent, barLayer);
+        return;
+    }
     // Kept: a round trip to appkitd here would hold up the frame the selection first appears in.
     static CGImageRef art;
     static CGFloat artKey;
@@ -2535,13 +2550,7 @@ static void DressBarSelection(CALayer *selection, CALayer *barLayer, CGFloat bar
     title.name = kBarTitleLayer;
     title.actions = @{ @"bounds": NSNull.null, @"position": NSNull.null, @"contents": NSNull.null, @"hidden": NSNull.null, @"opacity": NSNull.null, @"filters": NSNull.null };
     SetContents(title, art, scale, CGRectMake(0.49, 0, 0.02, 1));
-    CGRect bar = [barLayer convertRect:barLayer.bounds toLayer:parent];
-    id owner = parent.delegate;
-    // The agent's own selection runs 14 points past each side of a title. A status item's container already has its margins.
-    CGFloat x = 0, width = parent.bounds.size.width;
-    if (IsNamed(owner, "AppMenuItemView")) { x = -14; width += 28; }
-    else if (!IsNamed(owner, "SceneHostDisplayItemContainerView")) { x = selection.frame.origin.x; width = selection.frame.size.width; }
-    title.frame = CGRectMake(x, bar.origin.y, width, bar.size.height);
+    UpdateBarSelectionFrame(title, selection, parent, barLayer);
     title.zPosition = -1;   // beneath the title
     [parent addSublayer:title];
     [gBarSelections setObject:title forKey:selection];
@@ -2678,10 +2687,18 @@ static bool DressMenuBarWindow(NSWindow *window) {
         while (root.superlayer) root = root.superlayer;
         if (root == frame.layer || root == frame.layer.superlayer) DressBarSelection(parent, frame.layer, height, scale);
     }
-    // A selection taken away by some other means than removeFromSuperlayer.
+    // A selection taken away by some other means than removeFromSuperlayer, or resized after initial insertion.
     for (CALayer *selection in gBarSelections.keyEnumerator.allObjects) {
-        if (selection.superlayer) { selection.hidden = YES; continue; }
-        gOrigLayerRemove([gBarSelections objectForKey:selection], @selector(removeFromSuperlayer));
+        CALayer *title = [gBarSelections objectForKey:selection];
+        if (selection.superlayer) {
+            selection.hidden = YES;
+            CALayer *root = selection.superlayer;
+            while (root.superlayer) root = root.superlayer;
+            if (root == frame.layer || root == frame.layer.superlayer)
+                UpdateBarSelectionFrame(title, selection, selection.superlayer, frame.layer);
+            continue;
+        }
+        gOrigLayerRemove(title, @selector(removeFromSuperlayer));
         [gBarSelections removeObjectForKey:selection];
     }
     if (!wsAugmented && !window.hasShadow) window.hasShadow = YES;
@@ -2709,16 +2726,27 @@ static bool DressMenuBarWindow(NSWindow *window) {
             appleView = view;
         }
     }
-    bool selecting = false;
+    bool selecting = (gBarSelections.count > 0);
     for (NSView *view in itemViews) {
         CALayer *title = nil;
         for (CALayer *sub in view.layer.sublayers) if ([sub.name isEqual:kBarTitleLayer]) title = sub;
-        selecting |= title != nil;
-        bool onDark = title ? selectionDark : barDark;
+        bool containerSelected = false;
+        if (!title && view.superview.layer) {
+            CGRect vf = view.frame;
+            for (CALayer *sub in view.superview.layer.sublayers) {
+                if ([sub.name isEqual:kBarTitleLayer] && sub.frame.size.width > 0 && CGRectIntersectsRect(sub.frame, vf)) {
+                    containerSelected = true;
+                    break;
+                }
+            }
+        }
+        bool isSelected = (title != nil) || containerSelected;
+        selecting |= isSelected;
+        bool onDark = isSelected ? selectionDark : barDark;
         // Titles draw black; remote status items draw white on dark wallpaper and black on light wallpaper.
         bool invert;
         if (view == appleView) {
-            CGImageRef logo = LoadMLAppleLogo(title != nil);
+            CGImageRef logo = LoadMLAppleLogo(isSelected);
             if (logo && view.layer) {
                 // Hide macOS 27's flat black Apple glyph (sublayers, subviews, or direct layer contents).
                 for (NSView *sv in view.subviews) sv.alphaValue = 0;
@@ -2811,7 +2839,7 @@ static void BarLayerGainedSublayer(CALayer *layer, CALayer *sublayer) {
     id delegate = layer.delegate;
     if (!delegate) return;
     if ([sublayer.name hasPrefix:@"lioness."]) return;
-    if (IsNamed(delegate, "MenuBarHitTestingView") || IsNamed(delegate, "AppMenuItemContainerView")) {
+    if (IsNamed(delegate, "MenuBarHitTestingView") || (IsNamed(delegate, "AppMenuItemContainerView") && sublayer.delegate)) {
         DressMenuBarWindowImmediate([delegate window]);
         return;
     }
