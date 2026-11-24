@@ -788,6 +788,11 @@ hook(NSThemeFrame)
     return MIN(ZKOrig(double, a0, a1), 22.0);
 }
 
+// PRAISE THE LORD ITTR!
+- (double)_minXTitlebarWidgetInset {
+    return 7.0;
+}
+
 -(double)_minYTitlebarButtonsOffset {
     return -2.0;
 }
