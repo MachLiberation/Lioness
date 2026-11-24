@@ -540,6 +540,7 @@ static NSBezierPath *MenuOutline(NSRect box, CGFloat rTop, CGFloat rBot, Lioness
 @property (nonatomic, assign) NSInteger pendingSubmenuRow;
 @property (nonatomic, assign) CFAbsoluteTime openedAt;
 @property (nonatomic, assign) BOOL mouseMovedSinceOpen;
+@property (nonatomic, assign) BOOL mouseDownInMenu;
 @property (nonatomic, assign) NSPoint openMouseLocation;
 @property (nonatomic, copy) NSString *typeAhead;
 @property (nonatomic, assign) CFAbsoluteTime lastTypeAt;
@@ -1073,9 +1074,13 @@ static NSRect MenuArea(NSScreen *s) {
         LionessMenuView *v = panel.menuView;
         NSPoint lp = [v convertPoint:[panel convertPointFromScreen:screenPt] fromView:nil];
         if (!NSPointInRect(lp, v.menuBoxRect)) continue;
+        self.mouseDownInMenu = YES;
+        [self pointerMovedTo:screenPt];
         NSInteger row = [v rowIndexAtViewPoint:lp];
-        if (row >= 0) [self activateItemAtDepth:d row:row clickPointInView:lp fromKeyboard:NO];
-        return YES;   // a click on a separator or the padding does nothing
+        if (row >= 0 && ItemIsSelectable(v.items[row]) && ItemHasSubmenu(v.items[row])) {
+            [self openSubmenuAtDepth:d row:row];
+        }
+        return YES;   // wait for mouse-up to fire the item
     }
     NSInteger title = [self menuBarTitleIndexAt:screenPt];
     if (title != kNotInBar && title != kNoTitle && title != self.activeMenuBarIndex) {
@@ -1087,10 +1092,13 @@ static NSRect MenuArea(NSScreen *s) {
 }
 
 - (void)handleMouseUp:(NSPoint)screenPt {
-    // Press, drag, release (classic menu tracking): choose on release once the pointer has moved
-    // or the button was held. A quick click just leaves the menu open.
+    // Press, drag, release (classic menu tracking): choose on release if the button was pressed
+    // inside the menu, or once the pointer has moved / the button was held since open. A quick
+    // click that opened the menu just leaves it open.
+    BOOL fromInside = self.mouseDownInMenu;
+    self.mouseDownInMenu = NO;
     BOOL heldLong = (CFAbsoluteTimeGetCurrent() - self.openedAt) > 0.3;
-    if (!self.mouseMovedSinceOpen && !heldLong) return;
+    if (!fromInside && !self.mouseMovedSinceOpen && !heldLong) return;
     for (NSInteger d = (NSInteger)self.panels.count - 1; d >= 0; d--) {
         LionessMenuPanel *panel = self.panels[d];
         LionessMenuView *v = panel.menuView;
@@ -1102,6 +1110,7 @@ static NSRect MenuArea(NSScreen *s) {
         }
         return;
     }
+    if (fromInside) [self cancelAndCloseImmediately];
 }
 
 - (void)handleEvent:(NSEvent *)event {
