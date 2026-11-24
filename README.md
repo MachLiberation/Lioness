@@ -75,6 +75,10 @@ To try a build without installing, run `Scripts/Appkitd.sh start`, then `Scripts
 
 Mountain Lion's files belong to Apple and aren't part of this repository or the package.
 
+## Support Lioness
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/corebedtime)
+
 ## License
 
 [MIT](LICENSE)
