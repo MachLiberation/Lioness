@@ -3,6 +3,20 @@
     <title>Lioness</title>
     <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
     <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <installation-check script="checkOS();"/>
+    <script>
+    <![CDATA[
+    function checkOS() {
+        if (system.compareVersions(system.version.ProductVersion, '27.0') < 0) {
+            my.result.title = 'Unsupported macOS Version';
+            my.result.message = 'Lioness requires macOS 27 or later. Installing it on macOS ' + system.version.ProductVersion + ' could render your system in an unusable state.';
+            my.result.type = 'Warning';
+            return false;
+        }
+        return true;
+    }
+    ]]>
+    </script>
     <choices-outline><line choice="com.lioness.appkit"/></choices-outline>
     <choice id="com.lioness.appkit" title="Lioness" visible="false"><pkg-ref id="com.lioness.appkit"/></choice>
     <pkg-ref id="com.lioness.appkit" version="VERSION" onConclusion="none">Lioness-component.pkg</pkg-ref>
