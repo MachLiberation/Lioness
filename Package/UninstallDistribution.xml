@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Uninstall Lioness</title>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+    <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <choices-outline><line choice="com.lioness.uninstaller"/></choices-outline>
+    <choice id="com.lioness.uninstaller" title="Uninstall Lioness" visible="false"><pkg-ref id="com.lioness.uninstaller"/></choice>
+    <pkg-ref id="com.lioness.uninstaller" version="VERSION" onConclusion="RequireRestart">Lioness-uninstaller-component.pkg</pkg-ref>
+</installer-gui-script>

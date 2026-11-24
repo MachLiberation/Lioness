@@ -12,10 +12,12 @@ HOME_STAGE="$STAGE/Library/Lioness"
 PLUGINS="$BUILD/pkg-plugins"
 BUNDLE="$PLUGINS/LionessImage.bundle"
 OUT="$BUILD/Lioness-$VERSION.pkg"
+UNINSTALL_OUT="$BUILD/Lioness-Uninstaller-$VERSION.pkg"
+UNINSTALL_SCRIPTS="$BUILD/pkg-uninstall-scripts"
 RENDERER="$ROOT/ml-root/usr/libexec/lioness/renderer"
 cmake --build "$BUILD" --target appkitd skylightaugmentord lionessmenud LionessSpotlight LionessAqua LionessMenus DockFixes LionessRenderer
 chmod -R u+w "$STAGE" 2>/dev/null || true
-rm -rf "${BUILD:?}/pkg-root" "${BUILD:?}/pkg-plugins" "${OUT:?}"
+rm -rf "${BUILD:?}/pkg-root" "${BUILD:?}/pkg-plugins" "${BUILD:?}/pkg-uninstall-scripts" "${OUT:?}" "${UNINSTALL_OUT:?}"
 mkdir -p "$HOME_STAGE/tweak" "$BUNDLE/Contents/MacOS"
 
 cp "$BUILD/appkitd" "$BUILD/skylightaugmentord" "$BUILD/lionessmenud" "$BUILD/LionessSpotlight" "$RENDERER" "$HOME_STAGE/"
@@ -45,4 +47,14 @@ pkgbuild --root "$STAGE" --identifier com.lioness.appkit --version "$VERSION" --
     --scripts "$ROOT/Package/Scripts" --install-location / "$BUILD/Lioness-component.pkg"
 productbuild --distribution "$BUILD/Distribution.xml" --plugins "$PLUGINS" --package-path "$BUILD" "$OUT"
 rm -f "${BUILD:?}/Lioness-component.pkg"
-ls -la "$OUT"
+
+mkdir -p "$UNINSTALL_SCRIPTS"
+cp "$ROOT/Package/Uninstall.sh" "$UNINSTALL_SCRIPTS/postinstall"
+chmod 755 "$UNINSTALL_SCRIPTS/postinstall"
+xattr -c "$UNINSTALL_SCRIPTS/postinstall"
+sed "s/VERSION/$VERSION/g" "$ROOT/Package/UninstallDistribution.xml" > "$BUILD/UninstallDistribution.xml"
+pkgbuild --nopayload --identifier com.lioness.uninstaller --version "$VERSION" \
+    --scripts "$UNINSTALL_SCRIPTS" "$BUILD/Lioness-uninstaller-component.pkg"
+productbuild --distribution "$BUILD/UninstallDistribution.xml" --package-path "$BUILD" "$UNINSTALL_OUT"
+rm -rf "${BUILD:?}/Lioness-uninstaller-component.pkg" "${BUILD:?}/pkg-uninstall-scripts"
+ls -la "$OUT" "$UNINSTALL_OUT"

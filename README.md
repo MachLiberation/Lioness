@@ -39,6 +39,8 @@ pkill -x MenuBarAgent
 
 ## Uninstall
 
+Run `build/Lioness-Uninstaller-2.0.0.pkg` (from the release or built by `Scripts/BuildPackage.sh`) and restart when prompted, or run:
+
 ```bash
 sudo /Library/Lioness/Uninstall.sh
 ```
