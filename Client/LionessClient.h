@@ -21,6 +21,9 @@ CGImageRef LionessCopyCachedImage(const LionessRequest *request, int *status);
 /// LIONESS_PADDING points around it. +1: release it. NULL if appkitd cannot answer, or Lion drew nothing.
 CGImageRef LionessCopyDrawnImage(CFDictionaryRef options, uint32_t width, uint32_t height, uint32_t scale);
 
+/// Mountain Lion's sheet effect for these frames, run by appkitd: a binary property list (Protocol.h). +1, or NULL.
+CFDataRef LionessCopySheetFrames(const LionessSheetRequest *request);
+
 /// Whether appkitd can answer right now. Looks it up if due, so a sandbox or a stopped daemon reads false.
 bool LionessIsReachable(void);
 

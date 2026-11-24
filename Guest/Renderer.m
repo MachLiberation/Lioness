@@ -383,7 +383,255 @@ static OSStatus Render(const LionessRequest *r, void *pixels, uint32_t width, ui
     return status;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Mountain Lion's sheet effect. HIToolbox opened a sheet with CGSCreateMetalSheetWindowAnimationWithParent and stepped
+// it with CGSSetWindowAnimationProgress; CoreGraphics' MetalSheetProgress does the work: it warps the sheet out of a
+// slit under the parent's title bar, and makes and shades the slit and a shadow window as it goes. That code runs here
+// unchanged. Only the window server under it is a stand-in, which keeps a table of the windows and writes down what
+// is done to them; the app replays that on its own windows.
+
+typedef void *CGSRegionRef;
+extern CGError CGSNewRegionWithRect(const CGRect *rect, CGSRegionRef *region);
+extern CGError CGSGetRegionBounds(CGSRegionRef region, CGRect *bounds);
+extern CGError CGSReleaseRegion(CGSRegionRef region);
+extern CGError CGSCreateMetalSheetWindowAnimationWithParent(int cid, int wid, int flags, int parent, float left, float right, void **animation);
+extern CGError CGSSetWindowAnimationProgress(void *animation, float progress);
+extern CGError CGSReleaseWindowAnimation(void *animation);
+
+typedef struct {
+    int wid;
+    CGRect frame;          // window server coordinates
+    CGContextRef context;  // what CGWindowContextCreate handed out, drawn into by the effect
+    bool drawn;
+} StandInWindow;
+
+#define kStandInWindows 16
+#define kStandInScale 2
+static StandInWindow gWindows[kStandInWindows];
+static int gNextWindow = 100;
+static NSMutableArray *gOps;   // this frame's operations
+
+static StandInWindow *FindWindow(int wid) {
+    for (int i = 0; i < kStandInWindows; i++) if (gWindows[i].wid == wid) return &gWindows[i];
+    return NULL;
+}
+
+static StandInWindow *AddWindow(int wid, CGRect frame) {
+    for (int i = 0; i < kStandInWindows; i++) {
+        if (gWindows[i].wid) continue;
+        memset(&gWindows[i], 0, sizeof gWindows[i]);
+        gWindows[i].wid = wid;
+        gWindows[i].frame = frame;
+        return &gWindows[i];
+    }
+    return NULL;
+}
+
+static void DropWindow(StandInWindow *w) {
+    if (w->context) CGContextRelease(w->context);
+    memset(w, 0, sizeof *w);
+}
+
+static void Record(NSString *op, int wid, NSDictionary *more) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionaryWithObjectsAndKeys:op, @"op", [NSNumber numberWithInt:wid], @"wid", nil];
+    if (more) [d addEntriesFromDictionary:more];
+    [gOps addObject:d];
+}
+
+static NSDictionary *RectEntry(CGRect r) {
+    return [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithDouble:r.origin.x], @"x", [NSNumber numberWithDouble:r.origin.y], @"y",
+            [NSNumber numberWithDouble:r.size.width], @"w", [NSNumber numberWithDouble:r.size.height], @"h", nil];
+}
+
+static CGError SI_Nothing(void) { return 0; }
+static int SI_ServerOperationState(int what) { (void)what; return 0; }
+static CGError SI_CopyWindowShape(int cid, int wid, CGSRegionRef *region) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    if (!w) return kCGErrorIllegalArgument;
+    return CGSNewRegionWithRect(&w->frame, region);
+}
+static CGError SI_GetWindowTransform(int cid, int wid, CGAffineTransform *t) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    if (!w) return kCGErrorIllegalArgument;
+    *t = CGAffineTransformMakeTranslation(-w->frame.origin.x, -w->frame.origin.y);   // screen to window
+    return 0;
+}
+static CGError SI_CopyWindowGroup(int cid, int wid, CFStringRef group, uint32_t **list, int *count) {
+    (void)cid; (void)wid; (void)group;
+    if (list) *list = calloc(1, sizeof(uint32_t));
+    if (count) *count = 0;
+    return 0;
+}
+static CGError SI_GetScreenRectForWindow(int cid, int wid, CGRect *r) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    if (!w) return kCGErrorIllegalArgument;
+    *r = w->frame;
+    return 0;
+}
+static CGError SI_GetWindowLevel(int cid, int wid, int *level) { (void)cid; (void)wid; if (level) *level = 0; return 0; }
+static CGError SI_GetWindowTags(int cid, int wid, uint32_t *tags, int bits) {
+    (void)cid; (void)wid;
+    if (tags && bits > 0) memset(tags, 0, (size_t)(bits + 7) / 8);
+    return 0;
+}
+static CGError SI_MoveWindow(int cid, int wid, const CGPoint *p) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    if (w) w->frame.origin = *p;
+    Record(@"move", wid, [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithDouble:p->x], @"x", [NSNumber numberWithDouble:p->y], @"y", nil]);
+    return 0;
+}
+static CGError SI_OrderWindow(int cid, int wid, int mode, int relative) {
+    (void)cid;
+    Record(@"order", wid, [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithInt:mode], @"mode", [NSNumber numberWithInt:relative], @"relative", nil]);
+    return 0;
+}
+static CGError SI_SetWindowAlpha(int cid, int wid, float alpha) {
+    (void)cid;
+    Record(@"alpha", wid, [NSDictionary dictionaryWithObject:[NSNumber numberWithFloat:alpha] forKey:@"alpha"]);
+    return 0;
+}
+static CGError SI_SetWindowLevel(int cid, int wid, int level) {
+    (void)cid;
+    Record(@"level", wid, [NSDictionary dictionaryWithObject:[NSNumber numberWithInt:level] forKey:@"level"]);
+    return 0;
+}
+// A mesh of width x height vertices, each {local x, local y, global x, global y} in floats.
+static CGError SI_SetWindowWarp(int cid, int wid, int width, int height, const float *mesh) {
+    (void)cid;
+    NSData *data = (mesh && width > 0 && height > 0) ? [NSData dataWithBytes:mesh length:(NSUInteger)width * height * 4 * sizeof(float)] : [NSData data];
+    Record(@"warp", wid, [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithInt:width], @"w", [NSNumber numberWithInt:height], @"h", data, @"mesh", nil]);
+    return 0;
+}
+static CGError SI_NewWindowWithOpaqueShape(int cid, int type, float x, float y, CGSRegionRef shape, CGSRegionRef opaque, int unknown,
+                                           void *tags, int tagBits, int *wid) {
+    (void)cid; (void)type; (void)opaque; (void)unknown; (void)tags; (void)tagBits;
+    CGRect bounds = CGRectZero;
+    if (shape) CGSGetRegionBounds(shape, &bounds);
+    bounds.origin.x += x;
+    bounds.origin.y += y;
+    int id = gNextWindow++;
+    if (!AddWindow(id, bounds)) return kCGErrorFailure;
+    *wid = id;
+    Record(@"new", id, RectEntry(bounds));
+    return 0;
+}
+static CGError SI_SetWindowShape(int cid, int wid, float x, float y, CGSRegionRef shape) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    CGRect bounds = CGRectZero;
+    if (shape) CGSGetRegionBounds(shape, &bounds);
+    bounds.origin.x += x;
+    bounds.origin.y += y;
+    if (w) {
+        w->frame = bounds;
+        if (w->context) { CGContextRelease(w->context); w->context = NULL; }
+    }
+    Record(@"shape", wid, RectEntry(bounds));
+    return 0;
+}
+static CGError SI_ReleaseWindow(int cid, int wid) {
+    (void)cid;
+    StandInWindow *w = FindWindow(wid);
+    if (w && wid != LIONESS_SHEET_WID && wid != LIONESS_PARENT_WID) DropWindow(w);
+    Record(@"release", wid, nil);
+    return 0;
+}
+// A bitmap the size of the window, at Retina scale; what is drawn into it goes back as an image.
+static CGContextRef SI_WindowContextCreate(int cid, int wid, CFDictionaryRef options) {
+    (void)cid; (void)options;
+    StandInWindow *w = FindWindow(wid);
+    if (!w || w->frame.size.width < 1 || w->frame.size.height < 1) return NULL;
+    if (!w->context) {
+        size_t pw = (size_t)ceil(w->frame.size.width) * kStandInScale, ph = (size_t)ceil(w->frame.size.height) * kStandInScale;
+        CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+        w->context = CGBitmapContextCreate(NULL, pw, ph, 8, pw * 4, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        CGColorSpaceRelease(space);
+        if (!w->context) return NULL;
+        CGContextScaleCTM(w->context, kStandInScale, kStandInScale);
+    }
+    w->drawn = true;
+    return CGContextRetain(w->context);   // the effect releases what it is given
+}
+
+// movabs rax, target; jmp rax. The guest's memory is all writable, and nothing here has run yet to have been translated.
+static void Redirect(const char *symbol, void *to) {
+    uint8_t *p = dlsym(RTLD_DEFAULT, symbol);
+    if (!p) { fprintf(stderr, "renderer: no %s for the sheet effect\n", symbol); return; }
+    p[0] = 0x48; p[1] = 0xb8;
+    memcpy(p + 2, &to, sizeof to);
+    p[10] = 0xff; p[11] = 0xe0;
+}
+
+static void InstallStandInWindowServer(void) {
+    static const char *const nothing[] = {
+        "CGSDisableUpdate", "CGSReenableUpdate", "CGSAddWindowToWindowMovementGroup", "CGSRemoveWindowFromWindowMovementGroup",
+        "CGSAddWindowToWindowOrderingGroup", "CGSRemoveFromOrderingGroup", "CGSSetWindowParent", "CGSSetWindowTags",
+        "CGSSetWindowBackgroundBlurRadius", NULL,
+    };
+    for (int i = 0; nothing[i]; i++) Redirect(nothing[i], (void *)SI_Nothing);
+    Redirect("CGSServerOperationState", (void *)SI_ServerOperationState);
+    Redirect("CGSCopyWindowShape", (void *)SI_CopyWindowShape);
+    Redirect("CGSGetWindowTransform", (void *)SI_GetWindowTransform);
+    Redirect("CGSCopyWindowGroup", (void *)SI_CopyWindowGroup);
+    Redirect("CGSGetScreenRectForWindow", (void *)SI_GetScreenRectForWindow);
+    Redirect("CGSGetWindowLevel", (void *)SI_GetWindowLevel);
+    Redirect("CGSGetWindowTags", (void *)SI_GetWindowTags);
+    Redirect("CGSMoveWindow", (void *)SI_MoveWindow);
+    Redirect("CGSOrderWindow", (void *)SI_OrderWindow);
+    Redirect("CGSSetWindowAlpha", (void *)SI_SetWindowAlpha);
+    Redirect("CGSSetWindowLevel", (void *)SI_SetWindowLevel);
+    Redirect("CGSSetWindowWarp", (void *)SI_SetWindowWarp);
+    Redirect("CGSNewWindowWithOpaqueShape", (void *)SI_NewWindowWithOpaqueShape);
+    Redirect("CGSSetWindowShape", (void *)SI_SetWindowShape);
+    Redirect("CGSReleaseWindow", (void *)SI_ReleaseWindow);
+    Redirect("CGWindowContextCreate", (void *)SI_WindowContextCreate);
+}
+
+// What the effect drew into its own windows this frame.
+static void RecordImages(void) {
+    for (int i = 0; i < kStandInWindows; i++) {
+        StandInWindow *w = &gWindows[i];
+        if (!w->wid || !w->drawn || !w->context) continue;
+        w->drawn = false;
+        CGContextFlush(w->context);
+        size_t pw = CGBitmapContextGetWidth(w->context), ph = CGBitmapContextGetHeight(w->context);
+        NSData *pixels = [NSData dataWithBytes:CGBitmapContextGetData(w->context) length:CGBitmapContextGetBytesPerRow(w->context) * ph];
+        Record(@"image", w->wid, [NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithUnsignedLong:pw], @"pw",
+                                  [NSNumber numberWithUnsignedLong:ph], @"ph", pixels, @"pixels", nil]);
+    }
+}
+
+// The whole animation, one frame per progress value, then the release. NULL on failure.
+static NSData *RunSheetEffect(const LionessSheetRequest *r) {
+    for (int i = 0; i < kStandInWindows; i++) if (gWindows[i].wid) DropWindow(&gWindows[i]);
+    gNextWindow = 100;
+    AddWindow(LIONESS_SHEET_WID, CGRectMake(r->sheet[0], r->sheet[1], r->sheet[2], r->sheet[3]));
+    AddWindow(LIONESS_PARENT_WID, CGRectMake(r->parent[0], r->parent[1], r->parent[2], r->parent[3]));
+
+    NSMutableArray *frames = [NSMutableArray array];
+    gOps = [NSMutableArray array];
+    void *animation = NULL;
+    CGError err = CGSCreateMetalSheetWindowAnimationWithParent(1, LIONESS_SHEET_WID, 1, LIONESS_PARENT_WID, r->leftEdge, r->rightEdge, &animation);
+    if (err || !animation) { fprintf(stderr, "renderer: sheet effect: create failed: %d\n", err); gOps = nil; return nil; }
+    uint32_t count = r->frames > LIONESS_MAX_SHEET_FRAMES ? LIONESS_MAX_SHEET_FRAMES : r->frames;
+    for (uint32_t i = 0; i < count; i++) {
+        CGSSetWindowAnimationProgress(animation, r->progress[i]);
+        RecordImages();
+        [frames addObject:gOps];
+        gOps = [NSMutableArray array];
+    }
+    CGSReleaseWindowAnimation(animation);
+    [frames addObject:gOps];
+    gOps = nil;
+    return [NSPropertyListSerialization dataFromPropertyList:frames format:NSPropertyListBinaryFormat_v1_0 errorDescription:NULL];
+}
+
 int main(void) {
+    InstallStandInWindowServer();
     const char *portText = getenv("LIONESS_PORT");
     if (!portText) { fprintf(stderr, "renderer: no LIONESS_PORT\n"); return 1; }
     mach_port_t port = (mach_port_t)strtoul(portText, NULL, 0);
@@ -395,6 +643,7 @@ int main(void) {
         union {
             LionessRequestMessage request;
             LionessDrawMessage draw;
+            LionessSheetMessage sheet;
             LionessReplyMessage reply;
             char room[sizeof(LionessDrawMessage) + 128];
         } m;
@@ -405,7 +654,7 @@ int main(void) {
         }
         mach_port_t replyPort = m.request.header.msgh_remote_port;
         int id = m.request.header.msgh_id;
-        if ((id != LIONESS_MSG_RENDER && id != LIONESS_MSG_DRAW) || !replyPort) {
+        if ((id != LIONESS_MSG_RENDER && id != LIONESS_MSG_DRAW && id != LIONESS_MSG_SHEET) || !replyPort) {
             mach_msg_destroy(&m.request.header);
             continue;
         }
@@ -414,7 +663,20 @@ int main(void) {
         memset(&info, 0, sizeof info);
         void *pixels = NULL;
         size_t size = 0;
-        if (id == LIONESS_MSG_DRAW) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        if (id == LIONESS_MSG_SHEET) {
+            NSData *frames = RunSheetEffect(&m.sheet.sheet);
+            if (frames && frames.length) {
+                size = frames.length;
+                pixels = malloc(size);
+                memcpy(pixels, frames.bytes, size);
+                info.rowBytes = (uint32_t)size;
+                info.pixelWidth = (uint32_t)size;
+                info.pixelHeight = 1;
+            } else {
+                info.status = (uint32_t)paramErr;
+            }
+        } else if (id == LIONESS_MSG_DRAW) {
             const LionessDrawMessage *d = &m.draw;
             if (d->scale < 1 || d->scale > LIONESS_MAX_SCALE || !d->width || !d->height || d->width > LIONESS_MAX_POINTS ||
                 d->height > LIONESS_MAX_POINTS || d->length > LIONESS_MAX_OPTIONS) {
@@ -456,5 +718,6 @@ int main(void) {
         kr = mach_msg(&m.reply.header, MACH_SEND_MSG, sizeof m.reply, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (kr != KERN_SUCCESS) fprintf(stderr, "renderer: reply failed: %#x\n", kr);
         free(pixels);
+        [pool drain];
     }
 }

@@ -157,16 +157,29 @@ activate() {   # The tweak and the daemon go on only now, so no app is ever inje
     [ -d "$tweaks" ] || fail "Ammonia is not installed: $tweaks does not exist."
     launchctl bootout system/com.lioness.appkitd 2>/dev/null
     launchctl bootout system/com.lioness.skylightaugmentord 2>/dev/null
+    u=$(console_uid) || u=""
+    if [ -n "$u" ]; then
+        launchctl bootout "gui/$u/com.lioness.menud" 2>/dev/null || true
+    fi
     rm -f /private/var/ammonia/core/tweaks/.com.lioness.appkitd.token /private/var/ammonia/core/tweaks/libLionessAqua.dylib.whitelist /private/var/ammonia/core/tweaks/libLionessAqua.whitelist
+    # Pre-create writable sandbox token file for the user-session lionessmenud LaunchAgent.
+    : > "$tweaks/.com.lioness.menud.token" && chmod 666 "$tweaks/.com.lioness.menud.token"
     # New inodes, as running processes may have the old ones mapped.
     install_atomically "$HOME_DIR/tweak/libLionessAqua.dylib" "$tweaks/libLionessAqua.dylib" 755 || fail "could not install the tweak."
     install_atomically "$HOME_DIR/libLionessAqua.dylib.blacklist" "$tweaks/libLionessAqua.dylib.blacklist" 644 || fail "could not install the blacklist."
+    install_atomically "$HOME_DIR/tweak/libLionessMenus.dylib" "$tweaks/libLionessMenus.dylib" 755 || fail "could not install the menu tweak."
+    install_atomically "$HOME_DIR/libLionessMenus.dylib.blacklist" "$tweaks/libLionessMenus.dylib.blacklist" 644 || fail "could not install the menu blacklist."
     install_atomically "$HOME_DIR/com.lioness.appkitd.plist" /Library/LaunchDaemons/com.lioness.appkitd.plist 644 || fail "could not install the daemon."
     install_atomically "$HOME_DIR/com.lioness.skylightaugmentord.plist" /Library/LaunchDaemons/com.lioness.skylightaugmentord.plist 644 || fail "could not install skylightaugmentord."
+    install_atomically "$HOME_DIR/com.lioness.menud.plist" /Library/LaunchAgents/com.lioness.menud.plist 644 || fail "could not install lionessmenud."
     launchctl enable system/com.lioness.appkitd 2>/dev/null || true
     launchctl enable system/com.lioness.skylightaugmentord 2>/dev/null || true
     launchctl bootstrap system /Library/LaunchDaemons/com.lioness.appkitd.plist || fail "could not start com.lioness.appkitd."
     launchctl bootstrap system /Library/LaunchDaemons/com.lioness.skylightaugmentord.plist || fail "could not start com.lioness.skylightaugmentord."
+    if [ -n "$u" ]; then
+        launchctl enable "gui/$u/com.lioness.menud" 2>/dev/null || true
+        launchctl bootstrap "gui/$u" /Library/LaunchAgents/com.lioness.menud.plist || say "note: com.lioness.menud will start at next login"
+    fi
 }
 
 setup() {   # download | keep | image path

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>com.lioness.menud</string>
+    <key>ProgramArguments</key><array>
+        <string>/Library/Lioness/lionessmenud</string>
+        <string>/Library/Lioness/ml-root</string>
+    </array>
+    <key>MachServices</key><dict>
+        <key>com.lioness.menud</key><true/>
+    </dict>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>StandardErrorPath</key><string>/tmp/lionessmenud.log</string>
+    <key>StandardOutPath</key><string>/tmp/lionessmenud.log</string>
+</dict></plist>

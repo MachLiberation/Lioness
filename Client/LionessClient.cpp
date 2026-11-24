@@ -213,6 +213,42 @@ extern "C" CGImageRef LionessCopyCachedImage(const LionessRequest *request, int 
     return image;
 }
 
+// Mountain Lion's sheet effect, run by the guest: a binary property list of the frames (Protocol.h), or NULL. The first
+// request translates CoreGraphics' sheet code, so it gets longer than a drawing.
+extern "C" CFDataRef LionessCopySheetFrames(const LionessSheetRequest *request) {
+    std::lock_guard<std::mutex> lock(gLock);
+    mach_port_t service = Service();
+    if (!service) return NULL;
+    union {
+        LionessSheetMessage sheet;
+        struct { LionessReplyMessage reply; mach_msg_trailer_t trailer; } received;
+    } m;
+    memset(&m, 0, sizeof m);
+    m.sheet.sheet = *request;
+    mach_port_t reply = mig_get_reply_port();
+    m.sheet.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    m.sheet.header.msgh_size = sizeof m.sheet;
+    m.sheet.header.msgh_remote_port = service;
+    m.sheet.header.msgh_local_port = reply;
+    m.sheet.header.msgh_id = LIONESS_MSG_SHEET;
+    mach_msg_return_t kr = mach_msg(&m.sheet.header, MACH_SEND_MSG | MACH_RCV_MSG | MACH_SEND_TIMEOUT | MACH_RCV_TIMEOUT,
+                                    sizeof m.sheet, sizeof m, reply, 3000, MACH_PORT_NULL);
+    if (kr != MACH_MSG_SUCCESS) {
+        if (kr == MACH_RCV_TIMED_OUT) mig_dealloc_reply_port(reply);
+        return NULL;
+    }
+    const LionessReplyMessage &r = m.received.reply;
+    if (r.header.msgh_id != LIONESS_MSG_SHEET + 100 || !(r.header.msgh_bits & MACH_MSGH_BITS_COMPLEX)) {
+        mach_msg_destroy(&m.sheet.header);
+        return NULL;
+    }
+    CFDataRef data = NULL;
+    if (r.info.status == 0 && r.pixels.address && r.pixels.size >= r.info.rowBytes)
+        data = CFDataCreate(NULL, (const UInt8 *)r.pixels.address, r.info.rowBytes);
+    if (r.pixels.address) vm_deallocate(mach_task_self(), (vm_address_t)r.pixels.address, r.pixels.size);
+    return data;
+}
+
 bool LionessIsReachable(void) {
     std::lock_guard<std::mutex> lock(gLock);
     return Service() != MACH_PORT_NULL;

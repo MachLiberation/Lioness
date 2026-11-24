@@ -44,6 +44,13 @@ fi
 
 # Which image.
 CONSOLE=$(stat -f%u /dev/console 2>/dev/null); [ "${CONSOLE:-0}" = 0 ] && CONSOLE=""
+
+# The classic authentication dialog rather than the modern one, and NSConvolutionOverride1.
+# Global defaults are the user's, so they are written as the user.
+if [ -n "$CONSOLE" ]; then
+    launchctl asuser "$CONSOLE" sudo -u "#$CONSOLE" defaults write -g LAUI.UseModernAuthenticationUI false
+    launchctl asuser "$CONSOLE" sudo -u "#$CONSOLE" defaults write -g NSConvolutionOverride1 -float 4
+fi
 SOURCE=""
 WORK="$HOME_DIR/setup-work"
 # Written by the installer page, as the user. Trusted only if owned by that user.
@@ -116,4 +123,7 @@ done
 pkill -x MenuBarAgent >/dev/null 2>&1 || true
 pkill -x ControlCenter >/dev/null 2>&1 || true
 pkill -x NotificationCenter >/dev/null 2>&1 || true
+pkill -x DockHelper >/dev/null 2>&1 || true
+pkill -x "Siri AI" >/dev/null 2>&1 || true
+pkill -x Spotlight >/dev/null 2>&1 || true
 exit 0

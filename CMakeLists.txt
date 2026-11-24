@@ -50,6 +50,25 @@ add_library(LionessClient STATIC Client/LionessClient.cpp)
 target_compile_options(LionessClient PRIVATE -fvisibility=hidden -Wno-deprecated-declarations)
 target_link_libraries(LionessClient PUBLIC "-framework CoreGraphics")
 
+add_library(LionessMenuClient STATIC Client/LionessMenuClient.mm)
+target_compile_options(LionessMenuClient PRIVATE -fobjc-arc -fvisibility=hidden -Wno-deprecated-declarations)
+target_link_libraries(LionessMenuClient PUBLIC "-framework Foundation" "-framework AppKit")
+
+add_executable(lionessmenud Daemon/LionessMenud.mm)
+target_compile_options(lionessmenud PRIVATE -fobjc-arc -Wno-deprecated-declarations)
+target_link_libraries(lionessmenud PRIVATE LionessClient
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreText")
+
+add_executable(LionessSpotlight Tools/LionessSpotlight.mm)
+target_compile_options(LionessSpotlight PRIVATE -fobjc-arc -Wno-deprecated-declarations)
+target_link_libraries(LionessSpotlight PRIVATE LionessClient LionessMenuClient
+    "-framework AppKit" "-framework CoreServices" "-framework CoreText")
+
+add_library(LionessMenus SHARED Dylib/LionessMenus.mm)
+target_compile_options(LionessMenus PRIVATE -fobjc-arc -fvisibility=hidden -Wno-deprecated-declarations)
+target_link_libraries(LionessMenus PRIVATE LionessMenuClient
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreGraphics")
+
 # Dobby, pinned. Its symbol resolver finds SwiftUI's unexported functions.
 include(FetchContent)
 set(DOBBY_DEBUG OFF CACHE BOOL "" FORCE)
@@ -61,12 +80,13 @@ FetchContent_Declare(Dobby
 FetchContent_MakeAvailable(Dobby)
 
 # LionLayout.m and ZKSwizzle come from MacOSXArt, which is written for ARC.
-add_library(LionessAqua SHARED Dylib/LionessAqua.mm Dylib/LionLayout.m Dylib/ZKSwizzle.m)
+add_library(LionessAqua SHARED Dylib/LionessAqua.mm Dylib/LionessSheets.mm Dylib/LionLayout.m Dylib/ZKSwizzle.m)
 set_source_files_properties(Dylib/LionLayout.m Dylib/ZKSwizzle.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-w;-fmodules")
 target_link_libraries(LionessAqua PRIVATE LionessClient dobby_static
     "-framework AppKit" "-framework QuartzCore" "-framework CoreText" "-lc++")
 target_compile_options(LionessAqua PRIVATE -fvisibility=hidden -Wno-deprecated-declarations)
 set_source_files_properties(Dylib/LionessAqua.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
+set_source_files_properties(Dylib/LionessSheets.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
 add_executable(AquaGallery Tools/AquaGallery.m)
 set_target_properties(AquaGallery PROPERTIES OSX_ARCHITECTURES arm64)
