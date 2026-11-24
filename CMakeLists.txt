@@ -88,6 +88,10 @@ target_compile_options(LionessAqua PRIVATE -fvisibility=hidden -Wno-deprecated-d
 set_source_files_properties(Dylib/LionessAqua.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
 set_source_files_properties(Dylib/LionessSheets.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
+add_library(DockFixes SHARED Dylib/DockFixes.mm)
+target_link_libraries(DockFixes PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreText" "-framework ImageIO" "-lc++")
+target_compile_options(DockFixes PRIVATE -fobjc-arc -fvisibility=hidden -Wno-deprecated-declarations)
+
 add_executable(AquaGallery Tools/AquaGallery.m)
 set_target_properties(AquaGallery PROPERTIES OSX_ARCHITECTURES arm64)
 target_link_libraries(AquaGallery PRIVATE "-framework AppKit" "-framework QuartzCore")
